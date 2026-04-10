@@ -7,8 +7,8 @@
 
 extern crate alloc;
 
-pub mod quantization;
 pub mod ops;
+pub mod quantization;
 pub mod rope;
 
 // Compression targets as constants

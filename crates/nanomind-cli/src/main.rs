@@ -1,17 +1,20 @@
 //! NanoMind CLI — Load model, chat loop, benchmark.
 
 use std::fs;
-use std::io::{self, Write, BufRead};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::time::Instant;
 
 use clap::Parser;
 use nanomind_model::file_format::load_model;
-use nanomind_runtime::{InferenceEngine, SamplingConfig, fits_ram, estimate_ram_usage};
+use nanomind_runtime::{estimate_ram_usage, fits_ram, InferenceEngine, SamplingConfig};
 use nanomind_tokenizer::BpeTokenizer;
 
 #[derive(Parser, Debug)]
-#[command(name = "nanomind", about = "Ultra-compressed Rust LLM inference engine")]
+#[command(
+    name = "nanomind",
+    about = "Ultra-compressed Rust LLM inference engine"
+)]
 struct Args {
     /// Path to .nm model file
     #[arg(short, long)]
@@ -66,31 +69,54 @@ fn main() {
     };
 
     let load_time = load_start.elapsed();
-    let ram_mb = estimate_ram_usage(&model.config, nanomind_model::model::QuantType::Q4, model.config.max_seq_len) / (1024 * 1024);
-    println!("[INFO] Model loaded: {} MB RAM ({:.2}s)", ram_mb, load_time.as_secs_f32());
+    let ram_mb = estimate_ram_usage(
+        &model.config,
+        nanomind_model::model::QuantType::Q4,
+        model.config.max_seq_len,
+    ) / (1024 * 1024);
+    println!(
+        "[INFO] Model loaded: {} MB RAM ({:.2}s)",
+        ram_mb,
+        load_time.as_secs_f32()
+    );
 
     // Check RAM budget
     if !fits_ram(&model.config, nanomind_model::model::QuantType::Q4) {
-        eprintln!("[WARN] Model estimated RAM usage ({} MB) exceeds 480 MB budget", ram_mb);
+        eprintln!(
+            "[WARN] Model estimated RAM usage ({} MB) exceeds 480 MB budget",
+            ram_mb
+        );
     }
 
     // Print config
     let config = &model.config;
-    println!("[INFO] Config: vocab={}, hidden={}, heads={}, kv_heads={}, layers={}, max_seq={}",
-        config.vocab_size, config.hidden_dim, config.num_heads, config.num_kv_heads,
-        config.num_layers, config.max_seq_len);
+    println!(
+        "[INFO] Config: vocab={}, hidden={}, heads={}, kv_heads={}, layers={}, max_seq={}",
+        config.vocab_size,
+        config.hidden_dim,
+        config.num_heads,
+        config.num_kv_heads,
+        config.num_layers,
+        config.max_seq_len
+    );
 
     // Load tokenizer
     let tokenizer_path = args.model.with_extension("json");
     let tokenizer = if tokenizer_path.exists() {
-        println!("[INFO] Loading tokenizer from {}...", tokenizer_path.display());
+        println!(
+            "[INFO] Loading tokenizer from {}...",
+            tokenizer_path.display()
+        );
         let content = fs::read_to_string(&tokenizer_path).unwrap_or_default();
         BpeTokenizer::from_json(&content).unwrap_or_else(|_| {
             eprintln!("[WARN] Failed to parse tokenizer JSON, using fallback");
             BpeTokenizer::new_fallback(config.vocab_size)
         })
     } else {
-        println!("[WARN] No tokenizer found at {}, using fallback", tokenizer_path.display());
+        println!(
+            "[WARN] No tokenizer found at {}, using fallback",
+            tokenizer_path.display()
+        );
         BpeTokenizer::new_fallback(config.vocab_size)
     };
 
@@ -142,8 +168,12 @@ fn run_single_prompt(engine: &mut InferenceEngine, args: &Args) {
     // Decode and print result
     let generated_text = engine.decode_tokens(&tokens);
     println!("{}", generated_text);
-    println!("\n[INFO] Generated {} tokens in {:.2}s ({:.1} tok/s)",
-        token_count, gen_time.as_secs_f32(), tok_per_sec);
+    println!(
+        "\n[INFO] Generated {} tokens in {:.2}s ({:.1} tok/s)",
+        token_count,
+        gen_time.as_secs_f32(),
+        tok_per_sec
+    );
 }
 
 /// Run interactive chat loop.
@@ -211,7 +241,11 @@ fn run_benchmark(engine: &mut InferenceEngine, args: &Args) {
     let gen_time = gen_start.elapsed();
     let tok_per_sec = token_count as f64 / gen_time.as_secs_f64();
 
-    let ram_mb = estimate_ram_usage(&engine.model.config, nanomind_model::model::QuantType::Q4, engine.model.config.max_seq_len) / (1024 * 1024);
+    let ram_mb = estimate_ram_usage(
+        &engine.model.config,
+        nanomind_model::model::QuantType::Q4,
+        engine.model.config.max_seq_len,
+    ) / (1024 * 1024);
 
     println!("\n=== Benchmark Results ===");
     println!("  Tokens generated: {}", token_count);

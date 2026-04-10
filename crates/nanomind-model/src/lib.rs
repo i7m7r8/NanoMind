@@ -1,7 +1,7 @@
 //! NanoMind Model — Qwen2-style transformer with .nm file format.
 
-pub mod model;
 pub mod file_format;
+pub mod model;
 
-pub use model::{Config, Model, KVCache, Layer};
 pub use file_format::{load_model, save_model};
+pub use model::{Config, KVCache, Layer, Model};

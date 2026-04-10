@@ -174,7 +174,11 @@ impl QuantizedTensor {
 ///
 /// `data` must have length divisible by 32.
 pub fn quantize_q4(data: &[f32]) -> Vec<Q4Block> {
-    assert!(data.len().is_multiple_of(QK4), "data length must be divisible by {}", QK4);
+    assert!(
+        data.len().is_multiple_of(QK4),
+        "data length must be divisible by {}",
+        QK4
+    );
     let n_blocks = data.len() / QK4;
     let mut blocks = Vec::with_capacity(n_blocks);
 
@@ -186,8 +190,12 @@ pub fn quantize_q4(data: &[f32]) -> Vec<Q4Block> {
         let mut min_val = block_data[0];
         let mut max_val = block_data[0];
         for &v in block_data.iter() {
-            if v < min_val { min_val = v; }
-            if v > max_val { max_val = v; }
+            if v < min_val {
+                min_val = v;
+            }
+            if v > max_val {
+                max_val = v;
+            }
         }
 
         // Asymmetric quantization: scale * quant - min
@@ -260,7 +268,11 @@ impl Q8Block {
 
 /// Quantize f32 slice into Q8 blocks.
 pub fn quantize_q8(data: &[f32]) -> Vec<Q8Block> {
-    assert!(data.len().is_multiple_of(QK8), "data length must be divisible by {}", QK8);
+    assert!(
+        data.len().is_multiple_of(QK8),
+        "data length must be divisible by {}",
+        QK8
+    );
     let n_blocks = data.len() / QK8;
     let mut blocks = Vec::with_capacity(n_blocks);
 
@@ -271,10 +283,16 @@ pub fn quantize_q8(data: &[f32]) -> Vec<Q8Block> {
         let mut max_abs = 0.0f32;
         for &v in block_data.iter() {
             let a = v.abs();
-            if a > max_abs { max_abs = a; }
+            if a > max_abs {
+                max_abs = a;
+            }
         }
 
-        let scale = if max_abs > 1e-8 { max_abs / 127.0 } else { 1e-8 };
+        let scale = if max_abs > 1e-8 {
+            max_abs / 127.0
+        } else {
+            1e-8
+        };
         let inv_scale = 1.0 / scale;
 
         let mut block = Q8Block::zero();
@@ -308,7 +326,14 @@ mod tests {
         for i in 0..32 {
             let expected = i as f32 * 0.1;
             let error = (out[i] - expected).abs();
-            assert!(error < 0.15, "Element {}: expected {}, got {}, error {}", i, expected, out[i], error);
+            assert!(
+                error < 0.15,
+                "Element {}: expected {}, got {}, error {}",
+                i,
+                expected,
+                out[i],
+                error
+            );
         }
     }
 
@@ -324,7 +349,13 @@ mod tests {
         for i in 0..32 {
             let expected = (i as f32 - 16.0) * 0.5;
             let error = (out[i] - expected).abs();
-            assert!(error < 0.05, "Element {}: expected {}, got {}", i, expected, out[i]);
+            assert!(
+                error < 0.05,
+                "Element {}: expected {}, got {}",
+                i,
+                expected,
+                out[i]
+            );
         }
     }
 

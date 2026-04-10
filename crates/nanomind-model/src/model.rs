@@ -1,7 +1,9 @@
 //! Transformer model architecture (Qwen2-style, GQA support, SwiGLU FFN).
 
+use nanomind_core::ops::{
+    dot_f32, rms_norm, silu_inplace, softmax_inplace, vec_add_inplace, vec_zero,
+};
 use nanomind_core::quantization::{QuantizedTensor, QK4};
-use nanomind_core::ops::{dot_f32, softmax_inplace, rms_norm, silu_inplace, vec_add_inplace, vec_zero};
 use nanomind_core::rope::{apply_rope_single_vec, precompute_rope};
 use std::vec::Vec;
 
@@ -43,11 +45,8 @@ impl Config {
         let weight_ram = params * bytes_per_param;
 
         // KV cache: 2 * num_layers * num_kv_heads * head_dim * max_seq * sizeof(f32)
-        let kv_cache = 2 * self.num_layers
-            * self.num_kv_heads
-            * self.head_dim()
-            * self.max_seq_len
-            * 4;
+        let kv_cache =
+            2 * self.num_layers * self.num_kv_heads * self.head_dim() * self.max_seq_len * 4;
 
         // Activation buffers: ~3 * hidden_dim * f32
         let activations = 3 * self.hidden_dim * 4;
@@ -174,22 +173,19 @@ pub struct Layer {
 /// Full model.
 pub struct Model {
     pub config: Config,
-    pub token_embeddings: QuantizedTensor,  // [vocab, hidden]
-    pub output_weights: QuantizedTensor,     // [vocab, hidden] (tied or separate)
-    pub final_norm: Vec<f32>,               // [hidden]
+    pub token_embeddings: QuantizedTensor, // [vocab, hidden]
+    pub output_weights: QuantizedTensor,   // [vocab, hidden] (tied or separate)
+    pub final_norm: Vec<f32>,              // [hidden]
     pub layers: Vec<Layer>,
-    pub rope_cos: Vec<f32>,                 // [max_seq, head_dim/2]
-    pub rope_sin: Vec<f32>,                 // [max_seq, head_dim/2]
+    pub rope_cos: Vec<f32>, // [max_seq, head_dim/2]
+    pub rope_sin: Vec<f32>, // [max_seq, head_dim/2]
 }
 
 impl Model {
     /// Create a new model and precompute RoPE tables.
     pub fn new(config: Config) -> Self {
-        let (rope_cos, rope_sin) = precompute_rope(
-            config.max_seq_len,
-            config.head_dim(),
-            config.rope_theta,
-        );
+        let (rope_cos, rope_sin) =
+            precompute_rope(config.max_seq_len, config.head_dim(), config.rope_theta);
 
         // Pre-allocate layer slots
         let layers = (0..config.num_layers)
@@ -291,8 +287,8 @@ pub fn transformer_block_forward(
         let q_head = &q[h * head_dim..(h + 1) * head_dim];
 
         for (t, score_ref) in attn_scores.iter_mut().enumerate().take(pos + 1) {
-            let k_t = &cache.k_cache[layer_idx][kv_head * kv_stride + t * head_dim..
-                                                kv_head * kv_stride + t * head_dim + head_dim];
+            let k_t = &cache.k_cache[layer_idx]
+                [kv_head * kv_stride + t * head_dim..kv_head * kv_stride + t * head_dim + head_dim];
             let score = dot_f32(q_head, k_t) / (head_dim as f32).sqrt();
             *score_ref = score;
         }
@@ -305,8 +301,8 @@ pub fn transformer_block_forward(
         vec_zero(o_head);
 
         for (t, &weight) in attn_scores.iter().enumerate().take(pos + 1) {
-            let v_t = &cache.v_cache[layer_idx][kv_head * kv_stride + t * head_dim..
-                                                kv_head * kv_stride + t * head_dim + head_dim];
+            let v_t = &cache.v_cache[layer_idx]
+                [kv_head * kv_stride + t * head_dim..kv_head * kv_stride + t * head_dim + head_dim];
             for d in 0..head_dim {
                 o_head[d] += weight * v_t[d];
             }
@@ -328,7 +324,12 @@ pub fn transformer_block_forward(
     // ─── SwiGLU FFN ───
     // gate = silu(x @ gate_proj)
     let mut gate = vec![0.0f32; config.intermediate_dim];
-    matmul_quantized(&ffn_buf, &layer.ffn_gate, config.intermediate_dim, &mut gate);
+    matmul_quantized(
+        &ffn_buf,
+        &layer.ffn_gate,
+        config.intermediate_dim,
+        &mut gate,
+    );
     silu_inplace(&mut gate);
 
     // up = x @ up_proj
@@ -436,9 +437,9 @@ mod tests {
             let n = rows * cols;
             // Round up to QK4 boundary
             let n_padded = (n + QK4 - 1) / QK4 * QK4;
-            let data: Vec<f32> = (0..n_padded).map(|_i| {
-                rng.next_f32() * 0.1 - 0.05
-            }).collect();
+            let data: Vec<f32> = (0..n_padded)
+                .map(|_i| rng.next_f32() * 0.1 - 0.05)
+                .collect();
             let blocks = quantize_q4(&data);
             QuantizedTensor::new(vec![rows, cols], blocks)
         };
@@ -459,10 +460,13 @@ mod tests {
         let mut x: Vec<f32> = (0..hd).map(|i| i as f32 * 0.01).collect();
 
         // Precompute RoPE tables
-        let (rope_cos, rope_sin) = precompute_rope(config.max_seq_len, config.head_dim(), config.rope_theta);
+        let (rope_cos, rope_sin) =
+            precompute_rope(config.max_seq_len, config.head_dim(), config.rope_theta);
 
         // Run forward pass at position 0
-        transformer_block_forward(&mut x, &layer, &mut cache, 0, 0, &config, &rope_cos, &rope_sin);
+        transformer_block_forward(
+            &mut x, &layer, &mut cache, 0, 0, &config, &rope_cos, &rope_sin,
+        );
 
         // Output should be finite and different from input
         assert!(x.iter().all(|&v| v.is_finite()));

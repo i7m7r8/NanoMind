@@ -205,8 +205,7 @@ impl BpeTokenizer {
         let mut tokenizer = Self::new();
 
         let common = vec![
-            "<unk>", "<s>", "</s>", "<pad>",
-            "hello", "world", "the", "a", "is", "are",
+            "<unk>", "<s>", "</s>", "<pad>", "hello", "world", "the", "a", "is", "are",
         ];
 
         for (i, token) in common.iter().enumerate() {

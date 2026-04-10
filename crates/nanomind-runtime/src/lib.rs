@@ -1,7 +1,9 @@
 //! NanoMind Runtime — Inference loop, sampling, RAM budget enforcement.
 
 use nanomind_core::ops::softmax_with_temp;
-use nanomind_model::model::{Config, KVCache, Model, QuantType, compute_logits, embed_token, transformer_block_forward};
+use nanomind_model::model::{
+    compute_logits, embed_token, transformer_block_forward, Config, KVCache, Model, QuantType,
+};
 use nanomind_tokenizer::BpeTokenizer;
 
 use rand::{Rng, SeedableRng};
@@ -9,8 +11,8 @@ use rand::{Rng, SeedableRng};
 /// Sampling configuration.
 #[derive(Clone, Debug)]
 pub struct SamplingConfig {
-    pub temperature: f32,    // 0.0 = greedy
-    pub top_p: f32,          // nucleus sampling
+    pub temperature: f32, // 0.0 = greedy
+    pub top_p: f32,       // nucleus sampling
     pub top_k: usize,
     pub repetition_penalty: f32,
     pub max_new_tokens: usize,
@@ -99,7 +101,12 @@ impl InferenceEngine {
         for _gen_step in 0..self.config.max_new_tokens {
             // Compute logits
             let mut logits = vec![0.0f32; vocab_size];
-            compute_logits(&current_hidden, &self.model.output_weights, vocab_size, &mut logits);
+            compute_logits(
+                &current_hidden,
+                &self.model.output_weights,
+                vocab_size,
+                &mut logits,
+            );
 
             // Apply repetition penalty
             if let Some(prev_token) = last_token {
@@ -131,7 +138,12 @@ impl InferenceEngine {
             callback(token_id);
 
             // Embed the generated token for next iteration
-            embed_token(token_id, &self.model.token_embeddings, hd, &mut current_hidden);
+            embed_token(
+                token_id,
+                &self.model.token_embeddings,
+                hd,
+                &mut current_hidden,
+            );
 
             // Run through all layers
             let gen_pos = pos.min(max_seq_len - 1);
@@ -172,7 +184,12 @@ impl InferenceEngine {
         if self.config.temperature > 0.0 {
             // Top-k filtering
             if self.config.top_k > 0 && self.config.top_k < probs.len() {
-                let mut indexed: Vec<(f32, usize)> = probs.iter().copied().enumerate().map(|(i, p)| (p, i)).collect();
+                let mut indexed: Vec<(f32, usize)> = probs
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, p)| (p, i))
+                    .collect();
                 indexed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
                 // Keep only top-k
                 for (i, &(_, orig_idx)) in indexed.iter().enumerate().skip(self.config.top_k) {
@@ -186,7 +203,12 @@ impl InferenceEngine {
 
             // Top-p (nucleus) sampling
             if self.config.top_p < 1.0 {
-                let mut indexed: Vec<(f32, usize)> = probs.iter().copied().enumerate().map(|(i, p)| (p, i)).collect();
+                let mut indexed: Vec<(f32, usize)> = probs
+                    .iter()
+                    .copied()
+                    .enumerate()
+                    .map(|(i, p)| (p, i))
+                    .collect();
                 indexed.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
 
                 let mut cumulative = 0.0f32;

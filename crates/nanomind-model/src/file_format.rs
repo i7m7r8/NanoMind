@@ -18,13 +18,13 @@
 //! ```
 
 use std::fs::File;
-use std::io::{Read, Write, BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use std::vec::Vec;
 
 use nanomind_core::quantization::{Q4Block, QuantizedTensor};
 
-use crate::model::{Config, Model, Layer, QuantType};
+use crate::model::{Config, Layer, Model, QuantType};
 
 /// Magic bytes for the .nm format.
 pub const NM_MAGIC: [u8; 4] = *b"NANO";
@@ -41,9 +41,14 @@ pub fn load_model(path: &Path) -> Result<Model, String> {
 
     // Read magic
     let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic).map_err(|e| format!("Read magic: {}", e))?;
+    reader
+        .read_exact(&mut magic)
+        .map_err(|e| format!("Read magic: {}", e))?;
     if magic != NM_MAGIC {
-        return Err(format!("Invalid magic: {:?}, expected {:?}", magic, NM_MAGIC));
+        return Err(format!(
+            "Invalid magic: {:?}, expected {:?}",
+            magic, NM_MAGIC
+        ));
     }
 
     // Read version
@@ -55,9 +60,11 @@ pub fn load_model(path: &Path) -> Result<Model, String> {
     // Read config
     let config_len = read_u32(&mut reader).map_err(|e| format!("Read config len: {}", e))?;
     let mut config_bytes = vec![0u8; config_len as usize];
-    reader.read_exact(&mut config_bytes).map_err(|e| format!("Read config: {}", e))?;
-    let config: Config = serde_json::from_slice(&config_bytes)
-        .map_err(|e| format!("Parse config: {}", e))?;
+    reader
+        .read_exact(&mut config_bytes)
+        .map_err(|e| format!("Read config: {}", e))?;
+    let config: Config =
+        serde_json::from_slice(&config_bytes).map_err(|e| format!("Parse config: {}", e))?;
 
     // Read tensors
     let num_tensors = read_u32(&mut reader).map_err(|e| format!("Read num tensors: {}", e))?;
@@ -98,7 +105,9 @@ pub fn load_model(path: &Path) -> Result<Model, String> {
 
         let data_len = read_u32(&mut reader).map_err(|e| format!("Read data len: {}", e))?;
         let mut data = vec![0u8; data_len as usize];
-        reader.read_exact(&mut data).map_err(|e| format!("Read data: {}", e))?;
+        reader
+            .read_exact(&mut data)
+            .map_err(|e| format!("Read data: {}", e))?;
 
         let quant_type = QuantType::from_u8(dtype_byte)
             .ok_or_else(|| format!("Unknown dtype: {}", dtype_byte))?;
@@ -112,21 +121,26 @@ pub fn load_model(path: &Path) -> Result<Model, String> {
 
 /// Save a model to a .nm file.
 pub fn save_model(model: &Model, path: &Path) -> Result<(), String> {
-    let file = File::create(path).map_err(|e| format!("Cannot create {}: {}", path.display(), e))?;
+    let file =
+        File::create(path).map_err(|e| format!("Cannot create {}: {}", path.display(), e))?;
     let mut writer = BufWriter::new(file);
 
     // Write magic
-    writer.write_all(&NM_MAGIC).map_err(|e| format!("Write magic: {}", e))?;
+    writer
+        .write_all(&NM_MAGIC)
+        .map_err(|e| format!("Write magic: {}", e))?;
 
     // Write version
     write_u32(&mut writer, NM_VERSION).map_err(|e| format!("Write version: {}", e))?;
 
     // Write config
-    let config_bytes = serde_json::to_vec(&model.config)
-        .map_err(|e| format!("Serialize config: {}", e))?;
+    let config_bytes =
+        serde_json::to_vec(&model.config).map_err(|e| format!("Serialize config: {}", e))?;
     write_u32(&mut writer, config_bytes.len() as u32)
         .map_err(|e| format!("Write config len: {}", e))?;
-    writer.write_all(&config_bytes).map_err(|e| format!("Write config: {}", e))?;
+    writer
+        .write_all(&config_bytes)
+        .map_err(|e| format!("Write config: {}", e))?;
 
     // Collect all tensors
     let mut tensors: Vec<(String, QuantizedTensor)> = Vec::new();
@@ -148,13 +162,25 @@ pub fn save_model(model: &Model, path: &Path) -> Result<(), String> {
         tensors.push((format!("layers.{}.ffn_up", i), layer.ffn_up.clone()));
         tensors.push((format!("layers.{}.ffn_down", i), layer.ffn_down.clone()));
 
-        tensors.push((format!("layers.{}.attn_norm", i), f32_to_qtensor(&layer.attn_norm, &[model.config.hidden_dim])));
-        tensors.push((format!("layers.{}.ffn_norm", i), f32_to_qtensor(&layer.ffn_norm, &[model.config.hidden_dim])));
+        tensors.push((
+            format!("layers.{}.attn_norm", i),
+            f32_to_qtensor(&layer.attn_norm, &[model.config.hidden_dim]),
+        ));
+        tensors.push((
+            format!("layers.{}.ffn_norm", i),
+            f32_to_qtensor(&layer.ffn_norm, &[model.config.hidden_dim]),
+        ));
     }
 
     // RoPE tables
-    tensors.push(("rope_cos".into(), f32_to_qtensor(&model.rope_cos, &[model.rope_cos.len()])));
-    tensors.push(("rope_sin".into(), f32_to_qtensor(&model.rope_sin, &[model.rope_sin.len()])));
+    tensors.push((
+        "rope_cos".into(),
+        f32_to_qtensor(&model.rope_cos, &[model.rope_cos.len()]),
+    ));
+    tensors.push((
+        "rope_sin".into(),
+        f32_to_qtensor(&model.rope_sin, &[model.rope_sin.len()]),
+    ));
 
     // Write tensor count
     write_u32(&mut writer, tensors.len() as u32)
@@ -179,7 +205,9 @@ pub fn save_model(model: &Model, path: &Path) -> Result<(), String> {
         let data_bytes = serialize_q4_blocks(&tensor.blocks);
         write_u32(&mut writer, data_bytes.len() as u32)
             .map_err(|e| format!("Write data len: {}", e))?;
-        writer.write_all(&data_bytes).map_err(|e| format!("Write data: {}", e))?;
+        writer
+            .write_all(&data_bytes)
+            .map_err(|e| format!("Write data: {}", e))?;
     }
 
     writer.flush().map_err(|e| format!("Flush: {}", e))?;
@@ -243,7 +271,11 @@ fn deserialize_tensor(
         QuantType::Q4 => {
             let block_size = 20; // f16 + f16 + 16 bytes
             if !data.len().is_multiple_of(block_size) {
-                return Err(format!("Q4 data length {} not aligned to {}", data.len(), block_size));
+                return Err(format!(
+                    "Q4 data length {} not aligned to {}",
+                    data.len(),
+                    block_size
+                ));
             }
             let num_blocks = data.len() / block_size;
             let mut blocks = Vec::with_capacity(num_blocks);
@@ -273,7 +305,10 @@ fn deserialize_tensor(
             let blocks = nanomind_core::quantization::quantize_q4(&f32_data);
             Ok(QuantizedTensor::new(shape.to_vec(), blocks))
         }
-        _ => Err(format!("Deserialization for {:?} not implemented yet", quant_type)),
+        _ => Err(format!(
+            "Deserialization for {:?} not implemented yet",
+            quant_type
+        )),
     }
 }
 
@@ -313,10 +348,14 @@ fn assign_tensor(
             if let Some(layer_name) = name.strip_prefix("layers.") {
                 let parts: Vec<&str> = layer_name.splitn(2, '.').collect();
                 if parts.len() == 2 {
-                    let layer_idx: usize = parts[0].parse().map_err(|_| format!("Bad layer index: {}", parts[0]))?;
+                    let layer_idx: usize = parts[0]
+                        .parse()
+                        .map_err(|_| format!("Bad layer index: {}", parts[0]))?;
                     let param_name = parts[1];
 
-                    let layer = model.layers.get_mut(layer_idx)
+                    let layer = model
+                        .layers
+                        .get_mut(layer_idx)
                         .ok_or_else(|| format!("Layer {} out of range", layer_idx))?;
 
                     match param_name {
@@ -382,12 +421,12 @@ mod tests {
 
         // Fill the single layer
         let layer = &mut model.layers[0];
-        layer.attn_q = make_qt(256, 64);   // [num_heads * head_dim, hidden]
-        layer.attn_k = make_qt(256, 64);   // [num_kv_heads * head_dim, hidden]
-        layer.attn_v = make_qt(256, 64);   // [num_kv_heads * head_dim, hidden]
-        layer.attn_o = make_qt(64, 256);   // [hidden, num_heads * head_dim]
+        layer.attn_q = make_qt(256, 64); // [num_heads * head_dim, hidden]
+        layer.attn_k = make_qt(256, 64); // [num_kv_heads * head_dim, hidden]
+        layer.attn_v = make_qt(256, 64); // [num_kv_heads * head_dim, hidden]
+        layer.attn_o = make_qt(64, 256); // [hidden, num_heads * head_dim]
         layer.ffn_gate = make_qt(128, 64); // [intermediate, hidden]
-        layer.ffn_up = make_qt(128, 64);   // [intermediate, hidden]
+        layer.ffn_up = make_qt(128, 64); // [intermediate, hidden]
         layer.ffn_down = make_qt(64, 128); // [hidden, intermediate]
         layer.attn_norm = vec![1.0; 64];
         layer.ffn_norm = vec![1.0; 64];

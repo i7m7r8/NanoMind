@@ -60,11 +60,7 @@ fn apply_rope_single(q: &mut [f32], k: &mut [f32], pos: usize, theta: f32) {
 ///
 /// Returns `(cos_table, sin_table)` each of shape `[max_seq_len, head_dim/2]`.
 /// The tables are stored as flat arrays: table[pos * half_dim + i].
-pub fn precompute_rope(
-    max_seq_len: usize,
-    head_dim: usize,
-    theta: f32,
-) -> (Vec<f32>, Vec<f32>) {
+pub fn precompute_rope(max_seq_len: usize, head_dim: usize, theta: f32) -> (Vec<f32>, Vec<f32>) {
     assert!(head_dim.is_multiple_of(2));
     let half = head_dim / 2;
     let mut cos_table = vec![0.0f32; max_seq_len * half];
@@ -85,7 +81,12 @@ pub fn precompute_rope(
 
 /// Apply RoPE to a single vector (Q or K independently) using precomputed tables.
 #[inline]
-pub fn apply_rope_single_vec(vec: &mut [f32], head_dim: usize, cos_table: &[f32], sin_table: &[f32]) {
+pub fn apply_rope_single_vec(
+    vec: &mut [f32],
+    head_dim: usize,
+    cos_table: &[f32],
+    sin_table: &[f32],
+) {
     debug_assert!(head_dim.is_multiple_of(2));
     debug_assert_eq!(vec.len() % head_dim, 0);
 
@@ -167,12 +168,18 @@ mod tests {
         apply_rope(&mut q2, &mut k2, 1, head_dim, theta);
 
         // Values should have changed from pos=0
-        assert!(q2 != q || k2 != k, "Rotation at pos=1 should differ from pos=0");
+        assert!(
+            q2 != q || k2 != k,
+            "Rotation at pos=1 should differ from pos=0"
+        );
 
         // Magnitude should be preserved (rotation preserves norm)
         let orig_norm: f32 = q.iter().map(|x| x * x).sum();
         let new_norm: f32 = q2.iter().map(|x| x * x).sum();
-        assert!((orig_norm - new_norm).abs() < 1e-5, "RoPE should preserve vector norm");
+        assert!(
+            (orig_norm - new_norm).abs() < 1e-5,
+            "RoPE should preserve vector norm"
+        );
     }
 
     #[test]
