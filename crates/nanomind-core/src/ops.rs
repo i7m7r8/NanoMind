@@ -72,7 +72,7 @@ pub fn dequant_q8_0(block: &BlockQ8_0, out: &mut [f32; 32]) {
 #[inline(always)]
 pub fn dequant_q2_k(block: &BlockQ2K, out: &mut [f32; 64]) {
     let d = block.d.to_f32();
-    let _dmin = block.dmin.to_f32();
+    let dmin = block.dmin.to_f32();
 
     for j in 0..4 {
         let sc = (block.scales[j] & 0xF) as f32;
@@ -128,7 +128,7 @@ pub fn dequant_q3_k(block: &BlockQ3K, out: &mut [f32; 64]) {
 #[inline(always)]
 pub fn dequant_q4_k(block: &BlockQ4K, out: &mut [f32; 256]) {
     let d = block.d.to_f32();
-    let _dmin = block.dmin.to_f32();
+    let dmin = block.dmin.to_f32();
 
     // Scales layout: 8 scales for sub-blocks + 4 mins interleaved
     // The 12 bytes encode: 8 sub-block scales (6 bits each, packed) + 4 mins
