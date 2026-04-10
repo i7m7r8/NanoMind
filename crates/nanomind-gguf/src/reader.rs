@@ -10,6 +10,7 @@ use crate::metadata::GgufMetadata;
 use crate::tensor::TensorInfo;
 
 /// Memory-mapped GGUF file reader.
+#[allow(dead_code)]
 pub struct GgufReader {
     _file: File,
     mmap: Mmap,
@@ -67,9 +68,9 @@ impl GgufReader {
         }
 
         // Align to 32 bytes
-        let alignment = 32;
+        let alignment: u64 = 32;
         let offset = cursor.position();
-        let padded = (offset + alignment - 1) / alignment * alignment;
+        let padded = offset.div_ceil(alignment) * alignment;
         cursor.set_position(padded);
         let data_start = padded;
 

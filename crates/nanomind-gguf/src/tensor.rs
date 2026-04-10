@@ -27,8 +27,8 @@ impl TensorInfo {
         }
 
         let mut dims = [1u64; 4];
-        for i in 0..n_dims as usize {
-            dims[i] = cursor.read_u64_le()?;
+        for d in dims.iter_mut().take(n_dims as usize) {
+            *d = cursor.read_u64_le()?;
         }
 
         let ty_id = cursor.read_u32_le()?;
