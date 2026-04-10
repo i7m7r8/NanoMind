@@ -1,20 +1,17 @@
-//! NanoMind Core — Quantization, tensor ops, SIMD, RoPE.
+//! NanoMind Core — llama.cpp-compatible quantization, tensor ops, kernels.
 //!
-//! Pure Rust, minimal `unsafe` (only for SIMD intrinsics).
-//! No_std-compatible (use `alloc` only).
+//! Supports: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0,
+//!           Q2_K, Q3_K, Q4_K (Q4_K_M), Q5_K, Q6_K, IQ4_NL
 
-#![no_std]
-
-extern crate alloc;
-
+pub mod attention;
+pub mod ggml;
 pub mod ops;
-pub mod quantization;
 pub mod rope;
 
-// Compression targets as constants
-pub const PARAMS_NANO: usize = 135_000_000;
-pub const PARAMS_MINI: usize = 500_000_000;
-pub const PARAMS_SMALL: usize = 1_000_000_000;
+pub use ggml::*;
+pub use ops::*;
+pub use rope::*;
 
-// RAM budget (bytes) — refuse to load if estimate exceeds this
-pub const MAX_RAM_BUDGET: usize = 480 * 1024 * 1024; // 480 MB
+// Re-export half::f16 for downstream crates
+pub use attention::*;
+pub use half::f16;

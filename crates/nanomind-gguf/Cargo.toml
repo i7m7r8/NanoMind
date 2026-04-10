@@ -1,0 +1,9 @@
+[package]
+name = "nanomind-gguf"
+version = "0.1.0"
+edition = "2021"
+description = "GGUF file format parser for llama.cpp models"
+
+[dependencies]
+memmap2 = "0.9"
+nanomind-core = { path = "../nanomind-core" }

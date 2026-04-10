@@ -1,7 +1,12 @@
-//! NanoMind Model — Qwen2-style transformer with .nm file format.
+//! NanoMind Model — Transformer forward pass with GGUF weight loading.
+//!
+//! Supports: LLaMA, Qwen2, Mistral, Phi-3, Gemma 2 architectures.
 
-pub mod file_format;
+pub mod config;
+pub mod kv_cache;
+pub mod layers;
 pub mod model;
 
-pub use file_format::{load_model, save_model};
-pub use model::{Config, KVCache, Layer, Model};
+pub use config::ModelConfig;
+pub use kv_cache::KvCache;
+pub use model::Model;

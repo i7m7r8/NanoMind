@@ -1,0 +1,8 @@
+[package]
+name = "nanomind-sampling"
+version = "0.1.0"
+edition = "2021"
+description = "Advanced sampling: greedy, temperature, top-k, top-p, mirostat, grammar"
+
+[dependencies]
+rand = "0.8"

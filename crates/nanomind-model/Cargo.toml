@@ -2,12 +2,12 @@
 name = "nanomind-model"
 version = "0.1.0"
 edition = "2021"
-description = "Transformer architecture (Qwen2-style) for NanoMind"
+description = "Transformer architectures: LLaMA, Qwen2, Mistral, Phi, Gemma"
 
 [dependencies]
+half = "2"
 nanomind-core = { path = "../nanomind-core" }
+nanomind-gguf = { path = "../nanomind-gguf" }
 nanomind-tokenizer = { path = "../nanomind-tokenizer" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-half = "2"
-memmap2 = "0.9"

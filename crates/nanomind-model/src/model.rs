@@ -1,485 +1,387 @@
-//! Transformer model architecture (Qwen2-style, GQA support, SwiGLU FFN).
+//! Model loading from GGUF and transformer forward pass.
 
-use nanomind_core::ops::{
-    dot_f32, rms_norm, silu_inplace, softmax_inplace, vec_add_inplace, vec_zero,
-};
-use nanomind_core::quantization::{QuantizedTensor, QK4};
-use nanomind_core::rope::{apply_rope_single_vec, precompute_rope};
+use std::collections::HashMap;
+use std::path::Path;
 use std::vec::Vec;
 
-/// Model configuration.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct Config {
-    pub vocab_size: usize,
-    pub hidden_dim: usize,
-    pub num_heads: usize,
-    pub num_kv_heads: usize,
-    pub num_layers: usize,
-    pub intermediate_dim: usize,
-    pub max_seq_len: usize,
-    pub rope_theta: f32,
-    pub rms_norm_eps: f32,
-}
+use nanomind_core::{
+    dot_f32, rms_norm, silu_inplace, softmax_inplace, GgmlType, RopeCache, RopeConfig, RopeScaling,
+};
+use nanomind_gguf::GgufReader;
 
-impl Config {
-    /// Head dimension (always 128 for efficiency).
-    pub fn head_dim(&self) -> usize {
-        128
-    }
+use crate::config::{Architecture, ModelConfig};
+use crate::kv_cache::KvCache;
+use crate::layers::{LayerTensor, LayerWeights};
 
-    /// GQA groups per head.
-    pub fn kv_groups(&self) -> usize {
-        self.num_heads / self.num_kv_heads
-    }
-
-    /// Estimate RAM usage for a given max sequence length (bytes).
-    /// Includes model weights + KV cache.
-    pub fn estimate_ram_bytes(&self, quant_type: QuantType) -> usize {
-        let params = self.total_params();
-        let bytes_per_param = match quant_type {
-            QuantType::F32 => 4,
-            QuantType::F16 => 2,
-            QuantType::Q4 => 20 / QK4, // ~0.625 bytes/param
-            QuantType::Q8 => 1,
-        };
-        let weight_ram = params * bytes_per_param;
-
-        // KV cache: 2 * num_layers * num_kv_heads * head_dim * max_seq * sizeof(f32)
-        let kv_cache =
-            2 * self.num_layers * self.num_kv_heads * self.head_dim() * self.max_seq_len * 4;
-
-        // Activation buffers: ~3 * hidden_dim * f32
-        let activations = 3 * self.hidden_dim * 4;
-
-        weight_ram + kv_cache + activations
-    }
-
-    /// Total parameter count.
-    pub fn total_params(&self) -> usize {
-        let hd = self.hidden_dim;
-        let nh = self.num_heads;
-        let nkv = self.num_kv_heads;
-        let id = self.intermediate_dim;
-        let vd = self.vocab_size;
-        let n_layers = self.num_layers;
-
-        // Per layer:
-        // - attn: q_proj, k_proj, v_proj, o_proj
-        // - ffn: gate_proj, up_proj, down_proj
-        // - rms norms: 2 per layer (attn + ffn)
-        let per_layer = hd * (nh * 128 + nkv * 128 * 2 + nh * 128) // attn weights
-            + hd * id * 3 // FFN (gate, up, down)
-            + hd * 2; // RMS norms
-
-        // Embedding + final norm + lm_head
-        let embedding = vd * hd;
-        let output = vd * hd;
-
-        per_layer * n_layers + embedding + output
-    }
-}
-
-/// Quantization type for the model.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum QuantType {
-    F32 = 0,
-    F16 = 1,
-    Q4 = 2,
-    Q8 = 3,
-}
-
-impl QuantType {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(QuantType::F32),
-            1 => Some(QuantType::F16),
-            2 => Some(QuantType::Q4),
-            3 => Some(QuantType::Q8),
-            _ => None,
-        }
-    }
-}
-
-/// KV Cache for a single layer.
-///
-/// Stored as flat Vec<f32> for memory efficiency.
-/// Layout: [pos][head][dim] flattened.
-#[derive(Clone, Debug)]
-pub struct KVCache {
-    pub k_cache: Vec<Vec<f32>>, // [layer] flat[pos * kv_heads * head_dim]
-    pub v_cache: Vec<Vec<f32>>,
-    pub pos: usize,
+/// Fully loaded model ready for inference.
+pub struct Model {
+    pub config: ModelConfig,
+    pub rope_cache: RopeCache,
+    pub token_embeddings: LayerTensor,
+    pub output_norm: Vec<f32>,
+    pub output_weights: Option<LayerTensor>, // None if tied with embeddings
+    pub layers: Vec<LayerWeights>,
+    /// Maximum context the model supports.
     pub max_seq: usize,
 }
 
-impl KVCache {
-    /// Create a new KV cache.
-    pub fn new(config: &Config) -> Self {
-        let head_dim = config.head_dim();
-        let capacity = config.max_seq_len * config.num_kv_heads * head_dim;
-
-        Self {
-            k_cache: vec![vec![0.0f32; capacity]; config.num_layers],
-            v_cache: vec![vec![0.0f32; capacity]; config.num_layers],
-            pos: 0,
-            max_seq: config.max_seq_len,
-        }
-    }
-
-    /// Reset the cache for a new generation.
-    pub fn reset(&mut self) {
-        self.pos = 0;
-        // We don't zero the buffers — they'll be overwritten during generation
-    }
-
-    /// Get K cache for a layer at the current position.
-    #[inline]
-    pub fn k_at(&self, layer: usize, kv_head: usize, head_dim: usize) -> &[f32] {
-        let cache = &self.k_cache[layer];
-        let stride = self.max_seq * head_dim;
-        let base = kv_head * stride + self.pos * head_dim;
-        &cache[base..base + head_dim]
-    }
-
-    /// Get V cache for a layer at the current position.
-    #[inline]
-    pub fn v_at(&self, layer: usize, kv_head: usize, head_dim: usize) -> &[f32] {
-        let cache = &self.v_cache[layer];
-        let stride = self.max_seq * head_dim;
-        let base = kv_head * stride + self.pos * head_dim;
-        &cache[base..base + head_dim]
-    }
-}
-
-/// A single transformer layer's weights.
-#[derive(Clone)]
-pub struct Layer {
-    // Attention
-    pub attn_q: QuantizedTensor, // [hidden, n_heads * head_dim]
-    pub attn_k: QuantizedTensor, // [hidden, n_kv_heads * head_dim]
-    pub attn_v: QuantizedTensor, // [hidden, n_kv_heads * head_dim]
-    pub attn_o: QuantizedTensor, // [n_heads * head_dim, hidden]
-
-    // FFN (SwiGLU)
-    pub ffn_gate: QuantizedTensor, // [hidden, intermediate]
-    pub ffn_up: QuantizedTensor,   // [hidden, intermediate]
-    pub ffn_down: QuantizedTensor, // [intermediate, hidden]
-
-    // RMS Norms
-    pub attn_norm: Vec<f32>, // [hidden]
-    pub ffn_norm: Vec<f32>,  // [hidden]
-}
-
-/// Full model.
-pub struct Model {
-    pub config: Config,
-    pub token_embeddings: QuantizedTensor, // [vocab, hidden]
-    pub output_weights: QuantizedTensor,   // [vocab, hidden] (tied or separate)
-    pub final_norm: Vec<f32>,              // [hidden]
-    pub layers: Vec<Layer>,
-    pub rope_cos: Vec<f32>, // [max_seq, head_dim/2]
-    pub rope_sin: Vec<f32>, // [max_seq, head_dim/2]
-}
-
 impl Model {
-    /// Create a new model and precompute RoPE tables.
-    pub fn new(config: Config) -> Self {
-        let (rope_cos, rope_sin) =
-            precompute_rope(config.max_seq_len, config.head_dim(), config.rope_theta);
+    /// Load a model from a GGUF file.
+    pub fn from_gguf(path: &Path, max_ctx: Option<usize>) -> Result<Self, String> {
+        let reader =
+            GgufReader::open(path).map_err(|e| format!("Failed to open GGUF file: {}", e))?;
 
-        // Pre-allocate layer slots
-        let layers = (0..config.num_layers)
-            .map(|_| Layer {
-                attn_q: QuantizedTensor::new(vec![0], vec![]),
-                attn_k: QuantizedTensor::new(vec![0], vec![]),
-                attn_v: QuantizedTensor::new(vec![0], vec![]),
-                attn_o: QuantizedTensor::new(vec![0], vec![]),
-                ffn_gate: QuantizedTensor::new(vec![0], vec![]),
-                ffn_up: QuantizedTensor::new(vec![0], vec![]),
-                ffn_down: QuantizedTensor::new(vec![0], vec![]),
-                attn_norm: vec![1.0; config.hidden_dim],
-                ffn_norm: vec![1.0; config.hidden_dim],
-            })
-            .collect();
+        let config = ModelConfig::from_gguf(&reader.metadata);
+        let max_seq = max_ctx.unwrap_or(config.max_position_embeddings);
 
-        Self {
-            token_embeddings: QuantizedTensor::new(vec![0], vec![]),
-            output_weights: QuantizedTensor::new(vec![0], vec![]),
-            final_norm: vec![1.0; config.hidden_dim],
-            layers,
-            rope_cos,
-            rope_sin,
+        println!("{}", reader.summary());
+
+        // Build rope cache
+        let rope_config = RopeConfig {
+            dim: config.head_dim,
+            theta: config.rope_theta,
+            scaling_factor: max_seq as f32 / config.max_position_embeddings as f32,
+            scaling_type: if config.rope_scaling > 1.0 {
+                RopeScaling::NtkAware
+            } else {
+                RopeScaling::None
+            },
+        };
+        let rope_cache = RopeCache::new(&rope_config, max_seq);
+
+        // Load token embeddings
+        let token_embeddings = load_tensor(&reader, "token_embd.weight")
+            .ok_or_else(|| "Missing token_embd.weight".to_string())?;
+
+        // Load output norm
+        let output_norm_name = match config.arch {
+            Architecture::Gemma2 => "token_embd_norm.weight",
+            _ => "output_norm.weight",
+        };
+        let output_norm = load_f32_tensor(&reader, output_norm_name)
+            .or_else(|| load_f32_tensor(&reader, "norm.weight"))
+            .unwrap_or_else(|| vec![1.0; config.hidden_size]);
+
+        // Load output weights (may be tied)
+        let output_weights = load_tensor(&reader, "output.weight");
+
+        // Load layers
+        let num_layers = config.num_hidden_layers;
+        let mut layers = Vec::with_capacity(num_layers);
+
+        for layer_idx in 0..num_layers {
+            let prefix = format!("blk.{}", layer_idx);
+
+            let layer = LayerWeights {
+                attn_q: load_tensor(&reader, &format!("{}.attn_q.weight", prefix))
+                    .ok_or_else(|| format!("Missing {}.attn_q.weight", prefix))?,
+                attn_k: load_tensor(&reader, &format!("{}.attn_k.weight", prefix))
+                    .ok_or_else(|| format!("Missing {}.attn_k.weight", prefix))?,
+                attn_v: load_tensor(&reader, &format!("{}.attn_v.weight", prefix))
+                    .ok_or_else(|| format!("Missing {}.attn_v.weight", prefix))?,
+                attn_o: load_tensor(&reader, &format!("{}.attn_o.weight", prefix))
+                    .ok_or_else(|| format!("Missing {}.attn_o.weight", prefix))?,
+                ffn_gate: load_tensor(&reader, &format!("{}.ffn_gate.weight", prefix))
+                    .ok_or_else(|| format!("Missing {}.ffn_gate.weight", prefix))?,
+                ffn_up: load_tensor(&reader, &format!("{}.ffn_up.weight", prefix))
+                    .ok_or_else(|| format!("Missing {}.ffn_up.weight", prefix))?,
+                ffn_down: load_tensor(&reader, &format!("{}.ffn_down.weight", prefix))
+                    .ok_or_else(|| format!("Missing {}.ffn_down.weight", prefix))?,
+                attn_norm: load_f32_tensor(&reader, &format!("{}.attn_norm.weight", prefix))
+                    .unwrap_or_else(|| vec![1.0; config.hidden_size]),
+                ffn_norm: load_f32_tensor(&reader, &format!("{}.ffn_norm.weight", prefix))
+                    .unwrap_or_else(|| vec![1.0; config.hidden_size]),
+                ffn_gate_experts: None,
+                ffn_up_experts: None,
+                ffn_down_experts: None,
+            };
+
+            layers.push(layer);
+        }
+
+        println!(
+            "[INFO] Model loaded: {} layers, {} params, {} context",
+            num_layers,
+            config.estimate_params(),
+            max_seq,
+        );
+
+        Ok(Self {
             config,
-        }
-    }
-}
-
-// ─── Forward Pass ─────────────────────────────────────────────────────────
-
-/// Run a forward pass for a single token position.
-///
-/// `x` is the input embedding [hidden_dim], modified in-place to become
-/// the output embedding for this position.
-/// `layer_idx` is which transformer layer to run.
-/// `cache` is the KV cache (updated in-place).
-/// `pos` is the current token position.
-#[allow(clippy::too_many_arguments)]
-pub fn transformer_block_forward(
-    x: &mut [f32],
-    layer: &Layer,
-    cache: &mut KVCache,
-    layer_idx: usize,
-    pos: usize,
-    config: &Config,
-    rope_cos: &[f32],
-    rope_sin: &[f32],
-) {
-    let hd = config.hidden_dim;
-    let head_dim = config.head_dim();
-    let num_heads = config.num_heads;
-    let num_kv_heads = config.num_kv_heads;
-    let kv_groups = config.kv_groups();
-
-    // ─── Pre-Attention RMS Norm ───
-    let mut norm_buf = x.to_vec();
-    rms_norm(&mut norm_buf, &layer.attn_norm, config.rms_norm_eps);
-
-    // ─── Q, K, V Projections ───
-    let mut q = vec![0.0f32; num_heads * head_dim];
-    let mut k = vec![0.0f32; num_kv_heads * head_dim];
-    let mut v = vec![0.0f32; num_kv_heads * head_dim];
-
-    // Q = norm_x @ W_q
-    matmul_quantized(&norm_buf, &layer.attn_q, num_heads * head_dim, &mut q);
-    // K = norm_x @ W_k
-    matmul_quantized(&norm_buf, &layer.attn_k, num_kv_heads * head_dim, &mut k);
-    // V = norm_x @ W_v
-    matmul_quantized(&norm_buf, &layer.attn_v, num_kv_heads * head_dim, &mut v);
-
-    // ─── RoPE ───
-    let half_dim = head_dim / 2;
-    let rope_cos_sliced = &rope_cos[pos * half_dim..(pos + 1) * half_dim];
-    let rope_sin_sliced = &rope_sin[pos * half_dim..(pos + 1) * half_dim];
-
-    // Apply RoPE to K heads (once each)
-    apply_rope_single_vec(&mut k, head_dim, rope_cos_sliced, rope_sin_sliced);
-    // Apply RoPE to Q heads
-    apply_rope_single_vec(&mut q, head_dim, rope_cos_sliced, rope_sin_sliced);
-
-    // ─── Store K, V in cache ───
-    let kv_stride = cache.max_seq * head_dim;
-    for kv_head in 0..num_kv_heads {
-        let src_base = kv_head * head_dim;
-        let dst_base = kv_head * kv_stride + pos * head_dim;
-
-        cache.k_cache[layer_idx][dst_base..dst_base + head_dim]
-            .copy_from_slice(&k[src_base..src_base + head_dim]);
-        cache.v_cache[layer_idx][dst_base..dst_base + head_dim]
-            .copy_from_slice(&v[src_base..src_base + head_dim]);
+            rope_cache,
+            token_embeddings,
+            output_norm,
+            output_weights,
+            layers,
+            max_seq,
+        })
     }
 
-    // ─── Multi-Head Attention with KV Cache ───
-    let mut attn_scores = vec![0.0f32; pos + 1]; // scores for each past position
+    /// Run a forward pass for a single token.
+    ///
+    /// `input` is the token embedding (modified in-place).
+    /// `cache` is the KV cache.
+    /// `pos` is the absolute token position.
+    pub fn forward_token(&self, input: &mut [f32], cache: &mut KvCache, pos: usize) {
+        let cfg = &self.config;
+        let hd = cfg.hidden_size;
+        let head_dim = cfg.head_dim;
+        let n_heads = cfg.num_attention_heads;
+        let n_kv_heads = cfg.num_key_value_heads;
+        let kv_groups = cfg.kv_groups();
 
-    for h in 0..num_heads {
-        // In GQA, multiple query heads share the same KV head
-        let kv_head = h / kv_groups;
-        let q_head = &q[h * head_dim..(h + 1) * head_dim];
+        let mut residual = input.to_vec();
 
-        for (t, score_ref) in attn_scores.iter_mut().enumerate().take(pos + 1) {
-            let k_t = &cache.k_cache[layer_idx]
-                [kv_head * kv_stride + t * head_dim..kv_head * kv_stride + t * head_dim + head_dim];
-            let score = dot_f32(q_head, k_t) / (head_dim as f32).sqrt();
-            *score_ref = score;
+        for layer_idx in 0..cfg.num_hidden_layers {
+            let layer = &self.layers[layer_idx];
+
+            // Pre-attention RMS norm
+            let mut normed = residual.clone();
+            rms_norm(&mut normed, &layer.attn_norm, cfg.rms_norm_eps);
+
+            // Q projection
+            let mut q = vec![0.0f32; n_heads * head_dim];
+            layer.attn_q.matmul(&normed, &mut q);
+
+            // K projection
+            let mut k = vec![0.0f32; n_kv_heads * head_dim];
+            layer.attn_k.matmul(&normed, &mut k);
+
+            // V projection
+            let mut v = vec![0.0f32; n_kv_heads * head_dim];
+            layer.attn_v.matmul(&normed, &mut v);
+
+            // Apply RoPE
+            self.rope_cache.apply(&mut q, pos, head_dim);
+            self.rope_cache.apply(&mut k, pos, head_dim);
+
+            // Store in KV cache
+            cache.store(layer_idx, &k, &v);
+
+            // Multi-head attention with KV cache
+            let attn_out = self.attention_forward(&q, layer_idx, pos, cache, cfg);
+
+            // Output projection
+            let mut o_proj = vec![0.0f32; hd];
+            layer.attn_o.matmul(&attn_out, &mut o_proj);
+
+            // Residual
+            for i in 0..hd {
+                residual[i] += o_proj[i];
+            }
+
+            // Post-attention RMS norm
+            let mut normed = residual.clone();
+            rms_norm(&mut normed, &layer.ffn_norm, cfg.rms_norm_eps);
+
+            // SwiGLU FFN
+            let ffn_out = self.ffn_forward(&normed, layer, cfg);
+
+            // Residual
+            for i in 0..hd {
+                residual[i] += ffn_out[i];
+            }
         }
 
-        // Softmax over attention scores
-        softmax_inplace(&mut attn_scores);
+        input.copy_from_slice(&residual);
+    }
 
-        // Weighted sum of values
-        let o_head = &mut q[h * head_dim..(h + 1) * head_dim]; // reuse q buffer for output
-        vec_zero(o_head);
+    /// Multi-head attention with GQA.
+    fn attention_forward(
+        &self,
+        q: &[f32],
+        layer_idx: usize,
+        pos: usize,
+        cache: &KvCache,
+        cfg: &ModelConfig,
+    ) -> Vec<f32> {
+        let head_dim = cfg.head_dim;
+        let n_heads = cfg.num_attention_heads;
+        let n_kv_heads = cfg.num_key_value_heads;
+        let kv_groups = cfg.kv_groups();
+        let context = cache.attn_context();
+        let inv_sqrt_d = cfg.attn_norm_factor;
 
-        for (t, &weight) in attn_scores.iter().enumerate().take(pos + 1) {
-            let v_t = &cache.v_cache[layer_idx]
-                [kv_head * kv_stride + t * head_dim..kv_head * kv_stride + t * head_dim + head_dim];
-            for d in 0..head_dim {
-                o_head[d] += weight * v_t[d];
+        let mut output = vec![0.0f32; n_heads * head_dim];
+
+        for h in 0..n_heads {
+            let kv_h = h / kv_groups;
+            let q_head = &q[h * head_dim..(h + 1) * head_dim];
+
+            let mut scores = vec![0.0f32; context];
+
+            for t in 0..context {
+                let k_t = cache.get_k(layer_idx, t);
+                let kv_offset = kv_h * head_dim;
+                let k_slice = &k_t[kv_offset..kv_offset + head_dim];
+                scores[t] = dot_f32(q_head, k_slice) * inv_sqrt_d;
+            }
+
+            // Softmax
+            softmax_inplace(&mut scores);
+
+            // Weighted sum of values
+            let o_head = &mut output[h * head_dim..(h + 1) * head_dim];
+            for t in 0..context {
+                let v_t = cache.get_v(layer_idx, t);
+                let kv_offset = kv_h * head_dim;
+                let v_slice = &v_t[kv_offset..kv_offset + head_dim];
+                let w = scores[t];
+                for d in 0..head_dim {
+                    o_head[d] += w * v_slice[d];
+                }
+            }
+        }
+
+        output
+    }
+
+    /// SwiGLU FFN forward.
+    fn ffn_forward(&self, x: &[f32], layer: &LayerWeights, cfg: &ModelConfig) -> Vec<f32> {
+        let intermediate = cfg.intermediate_size;
+
+        // Gate: silu(x @ W_gate)
+        let mut gate = vec![0.0f32; intermediate];
+        layer.ffn_gate.matmul(x, &mut gate);
+        silu_inplace(&mut gate);
+
+        // Up: x @ W_up
+        let mut up = vec![0.0f32; intermediate];
+        layer.ffn_up.matmul(x, &mut up);
+
+        // Element-wise multiply
+        for i in 0..intermediate {
+            gate[i] *= up[i];
+        }
+
+        // Down: (gate * up) @ W_down
+        let mut out = vec![0.0f32; cfg.hidden_size];
+        layer.ffn_down.matmul(&gate, &mut out);
+
+        out
+    }
+
+    /// Embed a token ID into a vector.
+    pub fn embed_token(&self, token_id: u32, out: &mut [f32]) {
+        let hd = self.config.hidden_size;
+        let start = token_id as usize * hd;
+        // Dequantize the embedding row
+        let emb_data = &self.token_embeddings.data;
+        let blck = self.token_embeddings.ggml_type.blck_size();
+        let type_size = self.token_embeddings.ggml_type.type_size();
+
+        if self.token_embeddings.ggml_type == GgmlType::F32 {
+            for i in 0..hd {
+                let bytes: [u8; 4] = emb_data[(start + i) * 4..(start + i) * 4 + 4]
+                    .try_into()
+                    .unwrap();
+                out[i] = f32::from_le_bytes(bytes);
+            }
+        } else {
+            let row_start = (start / blck) * type_size;
+            nanomind_core::dequantize_block(
+                &emb_data[row_start..],
+                self.token_embeddings.ggml_type,
+                out,
+            );
+        }
+
+        // Gemma2 uses sqrt(d) * embedding
+        if self.config.arch == Architecture::Gemma2 {
+            let scale = (hd as f32).sqrt();
+            for v in out.iter_mut() {
+                *v *= scale;
             }
         }
     }
 
-    // q now holds the concatenated attention output for all heads
-    // ─── Output Projection ───
-    let mut attn_out = vec![0.0f32; hd];
-    matmul_quantized(&q, &layer.attn_o, hd, &mut attn_out);
+    /// Compute logits from hidden state.
+    pub fn compute_logits(&self, hidden: &[f32], logits: &mut [f32]) {
+        let vocab = self.config.vocab_size;
 
-    // ─── Residual Connection ───
-    vec_add_inplace(x, &attn_out);
+        if let Some(ref output_weights) = self.output_weights {
+            output_weights.matmul(hidden, logits);
+        } else {
+            // Tied weights: use transposed embeddings
+            let hd = self.config.hidden_size;
+            let blck = self.token_embeddings.ggml_type.blck_size();
+            let type_size = self.token_embeddings.ggml_type.type_size();
+            let emb = &self.token_embeddings.data;
 
-    // ─── Post-Attention RMS Norm (pre-FFN) ───
-    let mut ffn_buf = x.to_vec();
-    rms_norm(&mut ffn_buf, &layer.ffn_norm, config.rms_norm_eps);
+            for v in 0..vocab {
+                if self.token_embeddings.ggml_type == GgmlType::F32 {
+                    let mut sum = 0.0f32;
+                    for d in 0..hd {
+                        let bytes: [u8; 4] = emb[(v * hd + d) * 4..(v * hd + d) * 4 + 4]
+                            .try_into()
+                            .unwrap();
+                        sum += f32::from_le_bytes(bytes) * hidden[d];
+                    }
+                    logits[v] = sum;
+                } else {
+                    let row_start = (v * hd / blck) * type_size;
+                    logits[v] = nanomind_core::dot_q4_f32(
+                        &emb[row_start..],
+                        self.token_embeddings.ggml_type,
+                        hidden,
+                    );
+                }
+            }
+        }
 
-    // ─── SwiGLU FFN ───
-    // gate = silu(x @ gate_proj)
-    let mut gate = vec![0.0f32; config.intermediate_dim];
-    matmul_quantized(
-        &ffn_buf,
-        &layer.ffn_gate,
-        config.intermediate_dim,
-        &mut gate,
-    );
-    silu_inplace(&mut gate);
+        // Logit softcap (Gemma2)
+        if let Some(softcap) = self.config.logit_softcap {
+            for v in 0..vocab {
+                logits[v] = softcap * (logits[v] / softcap).tanh();
+            }
+        }
 
-    // up = x @ up_proj
-    let mut up = vec![0.0f32; config.intermediate_dim];
-    matmul_quantized(&ffn_buf, &layer.ffn_up, config.intermediate_dim, &mut up);
-
-    // hidden = gate * up (element-wise)
-    for i in 0..config.intermediate_dim {
-        gate[i] *= up[i];
-    }
-
-    // out = hidden @ down_proj
-    let mut ffn_out = vec![0.0f32; hd];
-    matmul_quantized(&gate, &layer.ffn_down, hd, &mut ffn_out);
-
-    // ─── Residual Connection ───
-    vec_add_inplace(x, &ffn_out);
-}
-
-/// Matrix-vector multiply with a quantized tensor.
-///
-/// `x` is input [input_dim], `weight` is [output_dim, input_dim] (row-major).
-/// `out` is output [output_dim].
-fn matmul_quantized(x: &[f32], weight: &QuantizedTensor, output_dim: usize, out: &mut [f32]) {
-    debug_assert_eq!(x.len(), weight.shape.last().copied().unwrap_or(0));
-    debug_assert_eq!(out.len(), output_dim);
-
-    for (i, o) in out.iter_mut().enumerate().take(output_dim) {
-        *o = weight.matmul_row(i * x.len(), x);
+        // Output norm (Gemma2)
+        if self.config.arch == Architecture::Gemma2 && !self.output_norm.is_empty() {
+            rms_norm(logits, &self.output_norm, self.config.rms_norm_eps);
+        }
     }
 }
 
-// ─── Embedding Lookup ─────────────────────────────────────────────────────
+/// Load a tensor from GGUF.
+fn load_tensor(reader: &GgufReader, name: &str) -> Option<LayerTensor> {
+    let info = reader.tensor_info(name)?;
+    let data = reader.tensor_data(name)?;
 
-/// Look up token embedding from the token embedding table.
-pub fn embed_token(
-    token_id: u32,
-    embeddings: &QuantizedTensor,
-    hidden_dim: usize,
-    out: &mut [f32],
-) {
-    debug_assert_eq!(out.len(), hidden_dim);
-    embeddings.dequantize_row(token_id as usize * hidden_dim, out);
+    let shape: Vec<usize> = info.shape().iter().map(|&d| d as usize).collect();
+
+    Some(LayerTensor {
+        data: data.to_vec(),
+        ggml_type: info.ty,
+        shape,
+    })
 }
 
-// ─── LM Head (logits computation) ─────────────────────────────────────────
+/// Load a tensor as f32 (for norm weights).
+fn load_f32_tensor(reader: &GgufReader, name: &str) -> Option<Vec<f32>> {
+    let info = reader.tensor_info(name)?;
+    let data = reader.tensor_data(name)?;
 
-/// Compute logits: logits = hidden @ output_weights^T
-pub fn compute_logits(
-    hidden: &[f32],
-    output_weights: &QuantizedTensor,
-    vocab_size: usize,
-    logits: &mut [f32],
-) {
-    debug_assert_eq!(logits.len(), vocab_size);
+    let n = info.n_elements() as usize;
+    let mut out = vec![0.0f32; n];
 
-    for (v, l) in logits.iter_mut().enumerate().take(vocab_size) {
-        *l = output_weights.matmul_row(v * hidden.len(), hidden);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use nanomind_core::quantization::quantize_q4;
-
-    fn make_test_config() -> Config {
-        Config {
-            vocab_size: 1000,
-            hidden_dim: 256,
-            num_heads: 4,
-            num_kv_heads: 2,
-            num_layers: 2,
-            intermediate_dim: 512,
-            max_seq_len: 512,
-            rope_theta: 10000.0,
-            rms_norm_eps: 1e-5,
+    match info.ty {
+        GgmlType::F32 => {
+            for i in 0..n {
+                let bytes: [u8; 4] = data[i * 4..i * 4 + 4].try_into().ok()?;
+                out[i] = f32::from_le_bytes(bytes);
+            }
+        }
+        GgmlType::F16 => {
+            for i in 0..n {
+                let bytes: [u8; 2] = data[i * 2..i * 2 + 2].try_into().ok()?;
+                out[i] = half::f16::from_le_bytes(bytes).to_f32();
+            }
+        }
+        _ => {
+            nanomind_core::dequantize_block(data, info.ty, &mut out);
         }
     }
 
-    #[test]
-    fn test_config_estimates() {
-        let config = make_test_config();
-        let ram = config.estimate_ram_bytes(QuantType::Q4);
-        assert!(ram > 0, "RAM estimate should be positive");
-    }
-
-    #[test]
-    fn test_kv_cache() {
-        let config = make_test_config();
-        let cache = KVCache::new(&config);
-        assert_eq!(cache.k_cache.len(), config.num_layers);
-        assert_eq!(cache.v_cache.len(), config.num_layers);
-        assert_eq!(cache.pos, 0);
-    }
-
-    #[test]
-    fn test_transformer_forward() {
-        let config = make_test_config();
-        let hd = config.hidden_dim;
-
-        // Create a minimal layer with random-ish weights
-        let mut rng = SimpleRng(42);
-        let mut make_qt = |rows: usize, cols: usize| -> QuantizedTensor {
-            let n = rows * cols;
-            // Round up to QK4 boundary
-            let n_padded = (n + QK4 - 1) / QK4 * QK4;
-            let data: Vec<f32> = (0..n_padded)
-                .map(|_i| rng.next_f32() * 0.1 - 0.05)
-                .collect();
-            let blocks = quantize_q4(&data);
-            QuantizedTensor::new(vec![rows, cols], blocks)
-        };
-
-        let layer = Layer {
-            attn_q: make_qt(config.num_heads * config.head_dim(), hd),
-            attn_k: make_qt(config.num_kv_heads * config.head_dim(), hd),
-            attn_v: make_qt(config.num_kv_heads * config.head_dim(), hd),
-            attn_o: make_qt(hd, config.num_heads * config.head_dim()),
-            ffn_gate: make_qt(config.intermediate_dim, hd),
-            ffn_up: make_qt(config.intermediate_dim, hd),
-            ffn_down: make_qt(hd, config.intermediate_dim),
-            attn_norm: vec![1.0; hd],
-            ffn_norm: vec![1.0; hd],
-        };
-
-        let mut cache = KVCache::new(&config);
-        let mut x: Vec<f32> = (0..hd).map(|i| i as f32 * 0.01).collect();
-
-        // Precompute RoPE tables
-        let (rope_cos, rope_sin) =
-            precompute_rope(config.max_seq_len, config.head_dim(), config.rope_theta);
-
-        // Run forward pass at position 0
-        transformer_block_forward(
-            &mut x, &layer, &mut cache, 0, 0, &config, &rope_cos, &rope_sin,
-        );
-
-        // Output should be finite and different from input
-        assert!(x.iter().all(|&v| v.is_finite()));
-    }
-
-    /// Simple deterministic RNG for tests.
-    struct SimpleRng(u64);
-
-    impl SimpleRng {
-        fn next_f32(&mut self) -> f32 {
-            // LCG
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-            ((self.0 >> 33) as f32) / (u32::MAX as f32)
-        }
-    }
+    Some(out)
 }

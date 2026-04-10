@@ -1,12 +1,13 @@
 [package]
-name = "nanomind-runtime"
+name = "nanomind-server"
 version = "0.1.0"
 edition = "2021"
-description = "Inference loop, KV cache, sampling for NanoMind"
+description = "Ollama-compatible HTTP API server"
 
 [dependencies]
 nanomind-core = { path = "../nanomind-core" }
 nanomind-model = { path = "../nanomind-model" }
 nanomind-tokenizer = { path = "../nanomind-tokenizer" }
-rand = "0.8"
-rand_distr = "0.4"
+nanomind-sampling = { path = "../nanomind-sampling" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

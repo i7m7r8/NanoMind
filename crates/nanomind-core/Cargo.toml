@@ -2,7 +2,8 @@
 name = "nanomind-core"
 version = "0.1.0"
 edition = "2021"
-description = "Pure math, tensor ops, quantization for NanoMind"
+description = "Quantization, tensor ops, RoPE, attention kernels"
 
 [dependencies]
-half = "2"
+half = { version = "2", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
