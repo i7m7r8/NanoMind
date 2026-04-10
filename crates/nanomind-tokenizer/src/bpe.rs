@@ -200,6 +200,36 @@ impl BpeTokenizer {
         result
     }
 
+    /// Create a new fallback tokenizer with byte-level tokens.
+    pub fn new_fallback(vocab_size: usize) -> Self {
+        let mut tokenizer = Self::new();
+
+        let common = vec![
+            "<unk>", "<s>", "</s>", "<pad>",
+            "hello", "world", "the", "a", "is", "are",
+        ];
+
+        for (i, token) in common.iter().enumerate() {
+            if i < vocab_size {
+                tokenizer.vocab.insert(token.to_string(), i as u32);
+                tokenizer.id_to_token.insert(i as u32, token.to_string());
+            }
+        }
+
+        for i in common.len()..vocab_size.min(300) {
+            let token = format!("<tok:{}>", i);
+            tokenizer.vocab.insert(token.clone(), i as u32);
+            tokenizer.id_to_token.insert(i as u32, token);
+        }
+
+        tokenizer.vocab_size = tokenizer.vocab.len();
+        tokenizer.special.unk_id = 0;
+        tokenizer.special.eos_id = 2;
+        tokenizer.special.eos_token = Some("</s>".into());
+
+        tokenizer
+    }
+
     /// Get vocabulary size.
     pub fn vocab_size(&self) -> usize {
         self.vocab_size
@@ -402,7 +432,7 @@ impl BpeTokenizer {
                             if let Some((k, v)) = parse_json_kv(part) {
                                 match k.trim() {
                                     "\"content\"" | "\"text\"" => {
-                                        tok_str = strip_quotes(&v.trim()).to_string();
+                                        tok_str = strip_quotes(v.trim()).to_string();
                                     }
                                     "\"id\"" => {
                                         tok_id = v.trim().parse().ok();

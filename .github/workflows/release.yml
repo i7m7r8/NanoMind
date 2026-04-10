@@ -1,0 +1,72 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release --bin nanomind
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanomind-linux-x86_64
+          path: target/release/nanomind
+
+  build-android-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+
+      - name: Install Android NDK toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [target.aarch64-linux-android]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build for Android ARM64
+        run: cargo build --release --target aarch64-linux-android --bin nanomind
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanomind-android-arm64
+          path: target/aarch64-linux-android/release/nanomind
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release --bin nanomind
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanomind-macos-arm64
+          path: target/release/nanomind

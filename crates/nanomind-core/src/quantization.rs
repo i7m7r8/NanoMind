@@ -97,7 +97,7 @@ impl QuantizedTensor {
 
     /// Number of Q4 blocks needed.
     pub fn num_blocks(&self) -> usize {
-        (self.num_elements() + QK4 - 1) / QK4
+        self.num_elements().div_ceil(QK4)
     }
 
     /// Dequantize a single row (flat index range) into `out`.
@@ -119,9 +119,7 @@ impl QuantizedTensor {
             let mut temp = [0.0f32; QK4];
             block.dequantize(&mut temp);
 
-            for i in 0..take {
-                out[out_idx + i] = temp[inner_offset + i];
-            }
+            out[out_idx..out_idx + take].copy_from_slice(&temp[inner_offset..inner_offset + take]);
 
             out_idx += take;
             elem_idx += take;
@@ -176,7 +174,7 @@ impl QuantizedTensor {
 ///
 /// `data` must have length divisible by 32.
 pub fn quantize_q4(data: &[f32]) -> Vec<Q4Block> {
-    assert!(data.len() % QK4 == 0, "data length must be divisible by {}", QK4);
+    assert!(data.len().is_multiple_of(QK4), "data length must be divisible by {}", QK4);
     let n_blocks = data.len() / QK4;
     let mut blocks = Vec::with_capacity(n_blocks);
 
@@ -202,9 +200,9 @@ pub fn quantize_q4(data: &[f32]) -> Vec<Q4Block> {
         block.scale = f16::from_f32(scale);
         block.min = f16::from_f32(min_val);
 
-        for i in 0..QK4 {
+        for (i, &v) in block_data.iter().enumerate() {
             // quant = round((val + min) / scale) clamped to [0, 15]
-            let qf = (block_data[i] + min_val) / scale;
+            let qf = (v + min_val) / scale;
             let q = qf.round().clamp(0.0, 15.0) as u8;
 
             let byte_idx = i / 2;
@@ -244,8 +242,8 @@ impl Q8Block {
     pub fn dequantize(&self, out: &mut [f32]) {
         debug_assert!(out.len() >= QK8);
         let s = self.scale.to_f32();
-        for i in 0..QK8 {
-            out[i] = s * self.quants[i] as f32;
+        for (i, &q) in self.quants.iter().enumerate() {
+            out[i] = s * q as f32;
         }
     }
 
@@ -262,7 +260,7 @@ impl Q8Block {
 
 /// Quantize f32 slice into Q8 blocks.
 pub fn quantize_q8(data: &[f32]) -> Vec<Q8Block> {
-    assert!(data.len() % QK8 == 0, "data length must be divisible by {}", QK8);
+    assert!(data.len().is_multiple_of(QK8), "data length must be divisible by {}", QK8);
     let n_blocks = data.len() / QK8;
     let mut blocks = Vec::with_capacity(n_blocks);
 

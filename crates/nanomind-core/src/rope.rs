@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 pub fn apply_rope(q: &mut [f32], k: &mut [f32], pos: usize, head_dim: usize, theta: f32) {
     debug_assert_eq!(q.len(), k.len());
     debug_assert_eq!(q.len() % head_dim, 0);
-    debug_assert!(head_dim % 2 == 0, "head_dim must be even for RoPE");
+    debug_assert!(head_dim.is_multiple_of(2), "head_dim must be even for RoPE");
 
     let num_heads = q.len() / head_dim;
 
@@ -65,7 +65,7 @@ pub fn precompute_rope(
     head_dim: usize,
     theta: f32,
 ) -> (Vec<f32>, Vec<f32>) {
-    assert!(head_dim % 2 == 0);
+    assert!(head_dim.is_multiple_of(2));
     let half = head_dim / 2;
     let mut cos_table = vec![0.0f32; max_seq_len * half];
     let mut sin_table = vec![0.0f32; max_seq_len * half];
@@ -83,6 +83,29 @@ pub fn precompute_rope(
     (cos_table, sin_table)
 }
 
+/// Apply RoPE to a single vector (Q or K independently) using precomputed tables.
+#[inline]
+pub fn apply_rope_single_vec(vec: &mut [f32], head_dim: usize, cos_table: &[f32], sin_table: &[f32]) {
+    debug_assert!(head_dim.is_multiple_of(2));
+    debug_assert_eq!(vec.len() % head_dim, 0);
+
+    let half = head_dim / 2;
+    let num_heads = vec.len() / head_dim;
+
+    for h in 0..num_heads {
+        let base = h * head_dim;
+        for i in 0..half {
+            let c = cos_table[i];
+            let s = sin_table[i];
+
+            let v0 = vec[base + i];
+            let v1 = vec[base + i + half];
+            vec[base + i] = v0 * c - v1 * s;
+            vec[base + i + half] = v0 * s + v1 * c;
+        }
+    }
+}
+
 /// Apply RoPE using precomputed tables.
 #[inline]
 pub fn apply_rope_table(
@@ -95,7 +118,7 @@ pub fn apply_rope_table(
 ) {
     debug_assert_eq!(q.len(), k.len());
     debug_assert_eq!(q.len() % head_dim, 0);
-    debug_assert!(head_dim % 2 == 0);
+    debug_assert!(head_dim.is_multiple_of(2));
 
     let half = head_dim / 2;
     let num_heads = q.len() / head_dim;

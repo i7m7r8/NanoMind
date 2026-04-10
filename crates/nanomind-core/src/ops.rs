@@ -120,7 +120,7 @@ pub fn silu_inplace(x: &mut [f32]) {
 /// Uses the tanh approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x³)))
 #[inline]
 pub fn gelu_approx_inplace(x: &mut [f32]) {
-    const SQRT_2_PI: f32 = 0.797_884_560_8;
+    const SQRT_2_PI: f32 = 0.797_884_6;
     for v in x.iter_mut() {
         let x3 = *v * *v * *v;
         let inner = SQRT_2_PI * (*v + 0.044_715 * x3);
@@ -148,10 +148,10 @@ pub fn matmul_f32(mat: &[f32], vec: &[f32], rows: usize, cols: usize, out: &mut 
     debug_assert_eq!(vec.len(), cols);
     debug_assert_eq!(out.len(), rows);
 
-    for r in 0..rows {
+    for (r, o) in out.iter_mut().enumerate().take(rows) {
         let row_start = r * cols;
         let row = &mat[row_start..row_start + cols];
-        out[r] = dot_f32(row, vec);
+        *o = dot_f32(row, vec);
     }
 }
 
