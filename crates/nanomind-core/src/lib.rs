@@ -5,10 +5,12 @@
 
 pub mod attention;
 pub mod ggml;
+pub mod gguf_writer;
 pub mod ops;
 pub mod rope;
 
 pub use ggml::*;
+pub use gguf_writer::*;
 pub use ops::*;
 pub use rope::*;
 

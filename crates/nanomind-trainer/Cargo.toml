@@ -1,0 +1,15 @@
+[package]
+name = "nanomind-trainer"
+version = "0.1.0"
+edition = "2021"
+description = "Train a transformer from scratch in pure Rust → output GGUF for Ollama"
+
+[[bin]]
+name = "nanomind-train"
+path = "src/main.rs"
+
+[dependencies]
+nanomind-core = { path = "../nanomind-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+flate2 = "1"
