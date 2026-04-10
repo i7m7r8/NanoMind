@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Instant;
 
 /// Ollama-compatible request.
 #[derive(serde::Deserialize, Debug)]

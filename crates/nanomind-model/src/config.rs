@@ -14,7 +14,7 @@ pub enum Architecture {
 }
 
 impl Architecture {
-    pub fn from_str(s: &str) -> Self {
+    pub fn from_name(s: &str) -> Self {
         match s {
             "llama" => Self::Llama,
             "qwen2" | "qwen3" => Self::Qwen2,
@@ -57,7 +57,7 @@ pub struct ModelConfig {
 impl ModelConfig {
     /// Parse from GGUF metadata.
     pub fn from_gguf(meta: &GgufMetadata) -> Self {
-        let arch = Architecture::from_str(meta.arch_string());
+        let arch = Architecture::from_name(meta.arch_string());
 
         let hidden_size = meta.embedding_length() as usize;
         let num_attention_heads = meta.head_count() as usize;
@@ -90,11 +90,7 @@ impl ModelConfig {
         };
 
         // Attention norm factor
-        let attn_norm_factor = if arch_str == "phi3" {
-            1.0 / (head_dim as f32).sqrt()
-        } else {
-            1.0 / (head_dim as f32).sqrt()
-        };
+        let attn_norm_factor = 1.0 / (head_dim as f32).sqrt();
 
         Self {
             arch,
@@ -144,8 +140,7 @@ impl ModelConfig {
         let ffn_params = 3 * h * ffn; // gate + up + down
         let layer_params = qkv + o_proj + ffn_params + 2 * h; // 2 RMS norms
 
-        let total = n_layers * layer_params + v * h * 2; // embedding + lm_head
-
-        total
+        // embedding + lm_head
+        n_layers * layer_params + v * h * 2
     }
 }

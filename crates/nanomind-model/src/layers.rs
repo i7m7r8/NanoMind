@@ -53,6 +53,7 @@ impl LayerTensor {
 
     /// Perform matrix-vector multiply: `out = W * x`.
     /// Dequantizes on-the-fly without inflating the full weight matrix.
+    #[allow(clippy::needless_range_loop)]
     pub fn matmul(&self, x: &[f32], out: &mut [f32]) {
         // W is [output_dim, input_dim] stored as GGUF dims
         // GGUF stores dims as [output_dim, input_dim] for 2D tensors

@@ -1,6 +1,5 @@
 //! Model loading from GGUF and transformer forward pass.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::vec::Vec;
 
@@ -122,13 +121,14 @@ impl Model {
     /// `input` is the token embedding (modified in-place).
     /// `cache` is the KV cache.
     /// `pos` is the absolute token position.
+    #[allow(clippy::needless_range_loop)]
     pub fn forward_token(&self, input: &mut [f32], cache: &mut KvCache, pos: usize) {
         let cfg = &self.config;
         let hd = cfg.hidden_size;
         let head_dim = cfg.head_dim;
         let n_heads = cfg.num_attention_heads;
         let n_kv_heads = cfg.num_key_value_heads;
-        let kv_groups = cfg.kv_groups();
+        let _kv_groups = cfg.kv_groups();
 
         let mut residual = input.to_vec();
 
@@ -187,17 +187,17 @@ impl Model {
     }
 
     /// Multi-head attention with GQA.
+    #[allow(clippy::needless_range_loop)]
     fn attention_forward(
         &self,
         q: &[f32],
         layer_idx: usize,
-        pos: usize,
+        _pos: usize,
         cache: &KvCache,
         cfg: &ModelConfig,
     ) -> Vec<f32> {
         let head_dim = cfg.head_dim;
         let n_heads = cfg.num_attention_heads;
-        let n_kv_heads = cfg.num_key_value_heads;
         let kv_groups = cfg.kv_groups();
         let context = cache.attn_context();
         let inv_sqrt_d = cfg.attn_norm_factor;
@@ -296,6 +296,7 @@ impl Model {
     }
 
     /// Compute logits from hidden state.
+    #[allow(clippy::needless_range_loop)]
     pub fn compute_logits(&self, hidden: &[f32], logits: &mut [f32]) {
         let vocab = self.config.vocab_size;
 
