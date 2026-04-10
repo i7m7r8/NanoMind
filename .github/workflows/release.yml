@@ -8,7 +8,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-linux:
+  build-linux-x86_64:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,11 +19,21 @@ jobs:
       - name: Build release
         run: cargo build --release --bin nanomind
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp target/release/nanomind release/nanomind-linux-x86_64
+          cd release
+          tar czf nanomind-linux-x86_64.tar.gz nanomind-linux-x86_64
+          sha256sum nanomind-linux-x86_64.tar.gz > nanomind-linux-x86_64.tar.gz.sha256
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
         with:
-          name: nanomind-linux-x86_64
-          path: target/release/nanomind
+          files: |
+            release/nanomind-linux-x86_64.tar.gz
+            release/nanomind-linux-x86_64.tar.gz.sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   build-android-arm64:
     runs-on: ubuntu-latest
@@ -35,7 +45,7 @@ jobs:
         with:
           targets: aarch64-linux-android
 
-      - name: Install Android NDK toolchain
+      - name: Install cross-compiler
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
@@ -45,14 +55,63 @@ jobs:
           linker = "aarch64-linux-gnu-gcc"
           EOF
 
-      - name: Build for Android ARM64
+      - name: Build release
         run: cargo build --release --target aarch64-linux-android --bin nanomind
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp target/aarch64-linux-android/release/nanomind release/nanomind-android-arm64
+          cd release
+          tar czf nanomind-android-arm64.tar.gz nanomind-android-arm64
+          sha256sum nanomind-android-arm64.tar.gz > nanomind-android-arm64.tar.gz.sha256
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
         with:
-          name: nanomind-android-arm64
-          path: target/aarch64-linux-android/release/nanomind
+          files: |
+            release/nanomind-android-arm64.tar.gz
+            release/nanomind-android-arm64.tar.gz.sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux-aarch64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Install cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat > .cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build release
+        run: cargo build --release --target aarch64-unknown-linux-gnu --bin nanomind
+
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp target/aarch64-unknown-linux-gnu/release/nanomind release/nanomind-linux-aarch64
+          cd release
+          tar czf nanomind-linux-aarch64.tar.gz nanomind-linux-aarch64
+          sha256sum nanomind-linux-aarch64.tar.gz > nanomind-linux-aarch64.tar.gz.sha256
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/nanomind-linux-aarch64.tar.gz
+            release/nanomind-linux-aarch64.tar.gz.sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   build-macos:
     runs-on: macos-latest
@@ -65,8 +124,46 @@ jobs:
       - name: Build release
         run: cargo build --release --bin nanomind
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Package binary
+        run: |
+          mkdir -p release
+          cp target/release/nanomind release/nanomind-macos-x86_64
+          cd release
+          tar czf nanomind-macos-x86_64.tar.gz nanomind-macos-x86_64
+          shasum -a 256 nanomind-macos-x86_64.tar.gz > nanomind-macos-x86_64.tar.gz.sha256
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
         with:
-          name: nanomind-macos-arm64
-          path: target/release/nanomind
+          files: |
+            release/nanomind-macos-x86_64.tar.gz
+            release/nanomind-macos-x86_64.tar.gz.sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release
+        run: cargo build --release --bin nanomind
+
+      - name: Package binary
+        run: |
+          mkdir release
+          copy target/release/nanomind.exe release/nanomind-windows-x86_64.exe
+          cd release
+          tar czf nanomind-windows-x86_64.tar.gz nanomind-windows-x86_64.exe
+          sha256sum nanomind-windows-x86_64.tar.gz > nanomind-windows-x86_64.tar.gz.sha256
+        shell: bash
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/nanomind-windows-x86_64.tar.gz
+            release/nanomind-windows-x86_64.tar.gz.sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
