@@ -11,6 +11,7 @@ use half::f16;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[allow(non_camel_case_types)]
 pub enum GgmlType {
     F32 = 0,
     F16 = 1,

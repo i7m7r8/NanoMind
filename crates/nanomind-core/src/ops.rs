@@ -61,6 +61,7 @@ pub fn dequant_q5_1(block: &BlockQ5_1, out: &mut [f32; 32]) {
 
 /// Dequantize a Q8_0 block to 32 f32 values.
 #[inline(always)]
+#[allow(clippy::needless_range_loop)]
 pub fn dequant_q8_0(block: &BlockQ8_0, out: &mut [f32; 32]) {
     let d = block.d.to_f32();
     for i in 0..32 {
@@ -128,7 +129,7 @@ pub fn dequant_q3_k(block: &BlockQ3K, out: &mut [f32; 64]) {
 #[inline(always)]
 pub fn dequant_q4_k(block: &BlockQ4K, out: &mut [f32; 256]) {
     let d = block.d.to_f32();
-    let dmin = block.dmin.to_f32();
+    let _dmin = block.dmin.to_f32();
 
     // Scales layout: 8 scales for sub-blocks + 4 mins interleaved
     // The 12 bytes encode: 8 sub-block scales (6 bits each, packed) + 4 mins
@@ -225,6 +226,7 @@ pub fn dequant_iq4_nl(block: &BlockIQ4NL, out: &mut [f32; 32]) {
 ///
 /// Returns the number of elements written to `out`.
 /// `data` must point to the start of a block of the given type.
+#[allow(clippy::needless_range_loop)]
 pub fn dequantize_block(data: &[u8], ty: GgmlType, out: &mut [f32]) -> usize {
     match ty {
         GgmlType::F32 => {

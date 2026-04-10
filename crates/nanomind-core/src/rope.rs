@@ -39,6 +39,7 @@ pub struct RopeCache {
 
 impl RopeCache {
     /// Build a RoPE cache for the given config and max sequence length.
+    #[allow(clippy::needless_range_loop)]
     pub fn new(config: &RopeConfig, max_seq: usize) -> Self {
         let half_dim = config.dim / 2;
         let mut cos = vec![0.0f32; max_seq * half_dim];
