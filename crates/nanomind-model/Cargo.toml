@@ -1,0 +1,13 @@
+[package]
+name = "nanomind-model"
+version = "0.1.0"
+edition = "2021"
+description = "Transformer architecture (Qwen2-style) for NanoMind"
+
+[dependencies]
+nanomind-core = { path = "../nanomind-core" }
+nanomind-tokenizer = { path = "../nanomind-tokenizer" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+half = "2"
+memmap2 = "0.9"

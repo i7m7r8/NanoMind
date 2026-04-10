@@ -1,0 +1,22 @@
+[package]
+name = "nanomind-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI binary for NanoMind — load model, chat loop, benchmark"
+
+[[bin]]
+name = "nanomind"
+path = "src/main.rs"
+
+[dependencies]
+nanomind-core = { path = "../nanomind-core" }
+nanomind-model = { path = "../nanomind-model" }
+nanomind-tokenizer = { path = "../nanomind-tokenizer" }
+nanomind-runtime = { path = "../nanomind-runtime" }
+clap = { version = "4", features = ["derive"] }
+memmap2 = "0.9"
+half = "2"
+serde_json = "1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

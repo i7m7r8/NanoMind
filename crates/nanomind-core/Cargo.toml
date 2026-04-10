@@ -1,0 +1,8 @@
+[package]
+name = "nanomind-core"
+version = "0.1.0"
+edition = "2021"
+description = "Pure math, tensor ops, quantization for NanoMind"
+
+[dependencies]
+half = "2"

@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "crates/nanomind-core",
+    "crates/nanomind-tokenizer",
+    "crates/nanomind-model",
+    "crates/nanomind-runtime",
+    "crates/nanomind-cli",
+]
+resolver = "2"

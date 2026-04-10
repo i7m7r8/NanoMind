@@ -1,0 +1,18 @@
+# Models (large binary files)
+models/*.nm
+models/*.bin
+models/*.safetensors
+
+# Build artifacts
+target/
+**/target/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
