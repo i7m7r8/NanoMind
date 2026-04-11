@@ -289,8 +289,7 @@ pub fn forward_batch(model: &TransformerModel, tokens: &[u32], seq_len: usize) -
         rope_apply(&mut q, &mut Vec::new(), 0, head_dim, cfg.rope_theta);
 
         // Multi-head attention (simplified: no KV cache for training batch)
-        let mut attn_out =
-            multi_head_attention(&q, &k, &v, seq_len, num_heads, num_kv_heads, head_dim);
+        let attn_out = multi_head_attention(&q, &k, &v, seq_len, num_heads, num_kv_heads, head_dim);
 
         // Output projection
         let attn_proj = matmul_fwd(&attn_out, &layer.attn_out, seq_len, num_heads * head_dim, h);

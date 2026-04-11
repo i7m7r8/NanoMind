@@ -80,6 +80,7 @@ pub enum GgufValue {
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(non_camel_case_types)]
 pub enum GgufDType {
     F32 = 0,
     F16 = 1,
@@ -174,6 +175,12 @@ pub struct GgufWriter {
     metadata: Vec<(String, GgufValue)>,
     tensor_infos: Vec<GgufTensorInfo>,
     data_buf: Vec<u8>,
+}
+
+impl Default for GgufWriter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GgufWriter {
@@ -438,7 +445,7 @@ impl GgufWriter {
     fn data_offset(&self) -> u64 {
         let total = self.header_size() + self.metadata_size() + self.tensor_info_size();
         // Align to 32 bytes
-        (total + ALIGNMENT - 1) / ALIGNMENT * ALIGNMENT
+        total.div_ceil(ALIGNMENT) * ALIGNMENT
     }
 
     /// Return the total size of the GGUF file in bytes.

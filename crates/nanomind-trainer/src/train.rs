@@ -83,7 +83,7 @@ pub fn softmax(logits: &[f32]) -> Vec<f32> {
 /// Estimate gradients via finite differences for a single parameter slice.
 /// This is slow but works for small models. For efficiency, we only
 /// estimate gradients for a random subset of parameters per step.
-pub fn estimate_gradients(
+fn estimate_gradients(
     params: &mut [f32],
     loss_fn: impl Fn(&[f32]) -> f32,
     epsilon: f32,
@@ -263,7 +263,7 @@ pub fn train_model(
 
             let loss_fn = |params: &[f32]| -> f32 {
                 // Temporarily update model params
-                let mut temp_model = model_for_loss(&model, params, cfg);
+                let temp_model = model_for_loss(&model, params, cfg);
                 let mut loss = 0.0f32;
                 for (input_seq, target_seq) in inputs_clone.iter().zip(targets_clone.iter()) {
                     let logits = forward_batch(&temp_model, input_seq, input_seq.len());
@@ -541,9 +541,6 @@ pub fn export_to_gguf(
     tokenizer: &ByteTokenizer,
     output_path: &Path,
 ) -> std::io::Result<()> {
-    use std::fs::File;
-    use std::io::Write;
-
     let cfg = &model.config;
     let mut writer = GgufWriter::new();
 
