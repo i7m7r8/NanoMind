@@ -8,162 +8,104 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build-linux-x86_64:
+  train-and-release:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release
-        run: cargo build --release --bin nanomind
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
 
-      - name: Package binary
+      - name: Download training data
         run: |
-          mkdir -p release
-          cp target/release/nanomind release/nanomind-linux-x86_64
-          cd release
-          tar czf nanomind-linux-x86_64.tar.gz nanomind-linux-x86_64
-          sha256sum nanomind-linux-x86_64.tar.gz > nanomind-linux-x86_64.tar.gz.sha256
+          mkdir -p data/raw
+          curl -sL "https://www.gutenberg.org/cache/epub/11/pg11.txt" -o data/raw/alice.txt
+          curl -sL "https://www.gutenberg.org/cache/epub/100/pg100.txt" -o data/raw/shakespeare.txt
+          curl -sL "https://www.gutenberg.org/cache/epub/132/pg132.txt" -o data/raw/artofwar.txt
+          cat data/raw/*.txt > data/corpus.txt
+          echo "Corpus: $(wc -c < data/corpus.txt) bytes"
 
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/nanomind-linux-x86_64.tar.gz
-            release/nanomind-linux-x86_64.tar.gz.sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build trainer
+        run: cargo build --release --package nanomind-trainer
 
-  build-android-arm64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-linux-android
-
-      - name: Install cross-compiler
+      - name: Train model
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          cat > .cargo/config.toml << 'EOF'
-          [target.aarch64-linux-android]
-          linker = "aarch64-linux-gnu-gcc"
+          cargo run --release --package nanomind-trainer -- \
+            train \
+            --steps 1000 \
+            --lr 0.001 \
+            --vocab 260 \
+            --hidden 128 \
+            --layers 4 \
+            --heads 4 \
+            --seq-len 32 \
+            --out nanomind.gguf
+
+      - name: Create Modelfile
+        run: |
+          cat > Modelfile << 'EOF'
+          FROM ./nanomind.gguf
+
+          PARAMETER temperature 0.7
+          PARAMETER top_p 0.9
+          PARAMETER top_k 40
+          PARAMETER repeat_penalty 1.1
+          PARAMETER num_ctx 256
+          PARAMETER stop "<|eos|>"
+
+          SYSTEM """You are NanoMind, a small AI assistant trained from scratch in pure Rust."""
           EOF
 
-      - name: Build release
-        run: cargo build --release --target aarch64-linux-android --bin nanomind
-
-      - name: Package binary
+      - name: Package release
         run: |
           mkdir -p release
-          cp target/aarch64-linux-android/release/nanomind release/nanomind-android-arm64
+          cp nanomind.gguf release/nanomind.gguf
+          cp Modelfile release/Modelfile
           cd release
-          tar czf nanomind-android-arm64.tar.gz nanomind-android-arm64
-          sha256sum nanomind-android-arm64.tar.gz > nanomind-android-arm64.tar.gz.sha256
+          tar czf nanomind-v${{ github.ref_name }}.tar.gz nanomind.gguf Modelfile
+          sha256sum nanomind-v${{ github.ref_name }}.tar.gz > nanomind-v${{ github.ref_name }}.tar.gz.sha256
+          ls -lh
 
-      - name: Upload release asset
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/nanomind-android-arm64.tar.gz
-            release/nanomind-android-arm64.tar.gz.sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+            release/nanomind.gguf
+            release/Modelfile
+            release/nanomind-v${{ github.ref_name }}.tar.gz
+            release/nanomind-v${{ github.ref_name }}.tar.gz.sha256
+          generate_release_notes: true
+          body: |
+            # NanoMind ${{ github.ref_name }}
 
-  build-linux-aarch64:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+            A language model trained from scratch in pure Rust, output as GGUF for Ollama.
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: aarch64-unknown-linux-gnu
+            ## Install
 
-      - name: Install cross-compiler
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-          mkdir -p .cargo
-          cat > .cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
+            ```bash
+            # Download the model
+            tar xzf nanomind-v${{ github.ref_name }}.tar.gz
 
-      - name: Build release
-        run: cargo build --release --target aarch64-unknown-linux-gnu --bin nanomind
+            # Import into Ollama
+            ollama create nanomind -f Modelfile
 
-      - name: Package binary
-        run: |
-          mkdir -p release
-          cp target/aarch64-unknown-linux-gnu/release/nanomind release/nanomind-linux-aarch64
-          cd release
-          tar czf nanomind-linux-aarch64.tar.gz nanomind-linux-aarch64
-          sha256sum nanomind-linux-aarch64.tar.gz > nanomind-linux-aarch64.tar.gz.sha256
+            # Chat
+            ollama run nanomind
+            ```
 
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/nanomind-linux-aarch64.tar.gz
-            release/nanomind-linux-aarch64.tar.gz.sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+            ## Model Details
 
-  build-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build release
-        run: cargo build --release --bin nanomind
-
-      - name: Package binary
-        run: |
-          mkdir -p release
-          cp target/release/nanomind release/nanomind-macos-x86_64
-          cd release
-          tar czf nanomind-macos-x86_64.tar.gz nanomind-macos-x86_64
-          shasum -a 256 nanomind-macos-x86_64.tar.gz > nanomind-macos-x86_64.tar.gz.sha256
-
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/nanomind-macos-x86_64.tar.gz
-            release/nanomind-macos-x86_64.tar.gz.sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build release
-        run: cargo build --release --bin nanomind
-
-      - name: Package binary
-        run: |
-          mkdir release
-          copy target/release/nanomind.exe release/nanomind-windows-x86_64.exe
-          cd release
-          tar czf nanomind-windows-x86_64.tar.gz nanomind-windows-x86_64.exe
-          sha256sum nanomind-windows-x86_64.tar.gz > nanomind-windows-x86_64.tar.gz.sha256
-        shell: bash
-
-      - name: Upload release asset
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/nanomind-windows-x86_64.tar.gz
-            release/nanomind-windows-x86_64.tar.gz.sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+            - **Architecture:** Transformer (GQA, SwiGLU, RoPE, RMSNorm)
+            - **Vocab:** 260 (byte-level)
+            - **Hidden dim:** 128
+            - **Layers:** 4
+            - **Heads:** 4
+            - **Sequence length:** 32
+            - **Parameters:** ~2M
+            - **Training data:** Public domain books (Alice, Shakespeare, Art of War)
+            - **Framework:** Pure Rust, autodiff backprop, AdamW optimizer
+            - **Runs on:** Any platform with Ollama or llama.cpp
