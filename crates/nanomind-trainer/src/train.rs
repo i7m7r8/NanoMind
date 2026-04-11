@@ -95,7 +95,7 @@ impl TrainingEngine {
 
         // Embed tokens
         let emb_data = self.model.token_embd.data.clone();
-        let emb_id = tape.var(emb_data, vec![vocab, h]);
+        let _emb_id = tape.var(emb_data, vec![vocab, h]);
 
         // Lookup embeddings for input tokens
         let mut hidden = vec![0.0f32; seq_len * h];
@@ -107,7 +107,7 @@ impl TrainingEngine {
                 .copy_from_slice(&self.model.token_embd.data[emb_start..emb_start + h]);
         }
 
-        let hidden_id = tape.var(hidden.clone(), vec![seq_len, h]);
+        let _hidden_id = tape.var(hidden.clone(), vec![seq_len, h]);
 
         // Transformer layers
         let mut layer_idx = 0;
@@ -119,7 +119,7 @@ impl TrainingEngine {
             let normed = apply_rms_norm_tape(&hidden, &layer.attn_norm.data, cfg.rms_norm_eps);
             let normed_id = tape.var(normed.clone(), vec![seq_len, h]);
             let norm_w_id = tape.var(layer.attn_norm.data.clone(), vec![h]);
-            let y_norm_id = tape.forward_rms_norm(normed_id, norm_w_id, cfg.rms_norm_eps);
+            let _y_norm_id = tape.forward_rms_norm(normed_id, norm_w_id, cfg.rms_norm_eps);
 
             // Q projection
             let q_w_id = tape.var(layer.attn_q.data.clone(), vec![h, n_heads * head_dim]);
@@ -240,7 +240,7 @@ impl TrainingEngine {
 
         // Map tape gradients back to flat param array
         let mut flat_grads = vec![0.0f32; self.all_params.len()];
-        for (var_id, grad) in &grads {
+        for (_var_id, grad) in &grads {
             // Check if this var_id corresponds to any model parameter
             for &(offset, len) in &self.param_slices {
                 // We need to match var_id to the right parameter
@@ -411,7 +411,6 @@ pub fn train_model(
     println!("Steps: {}", train_config.max_steps);
 
     // Create model
-    use crate::model::Rng;
     let model = TransformerModel::new(cfg.clone(), &mut rng);
     let total_params = model.param_count();
     println!("Total params: {}", total_params);

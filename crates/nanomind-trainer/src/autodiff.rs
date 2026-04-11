@@ -19,6 +19,12 @@ pub struct Tape {
     next_id: usize,
 }
 
+impl Default for Tape {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A recorded operation for backprop.
 enum Op {
     /// y = matmul(a, b) where a: [M, K], b: [K, N] → y: [M, N]
@@ -272,8 +278,6 @@ impl Tape {
         num_heads: usize,
         num_kv_heads: usize,
     ) -> (usize, usize) {
-        use std::f32::consts::PI;
-
         let mut q_out = self.vars[q_id].value.clone();
         let mut k_out = self.vars[k_id].value.clone();
         let half_dim = head_dim / 2;
@@ -355,7 +359,7 @@ impl Tape {
         let loss_id = self.var(vec![loss_val], vec![1]);
         self.ops.push(Op::SoftmaxCrossEntropy {
             logits_id,
-            target_id: target as usize,
+            target_id: target,
             loss_id,
             vocab,
         });
@@ -365,7 +369,7 @@ impl Tape {
     /// Backward pass: compute gradients for all parameters.
     /// Returns a map of var_id → gradient.
     pub fn backward(&self) -> Vec<(usize, Vec<f32>)> {
-        let n_vars = self.vars.len();
+        let _n_vars = self.vars.len();
         // Initialize gradients with correct sizes for each variable
         let mut grads: Vec<Vec<f32>> = self
             .vars
@@ -374,13 +378,8 @@ impl Tape {
             .collect();
 
         // Start with gradient 1.0 on the loss
-        if let Some(last) = self.ops.last() {
-            match last {
-                Op::SoftmaxCrossEntropy { loss_id, .. } => {
-                    grads[*loss_id] = vec![1.0f32];
-                }
-                _ => {}
-            }
+        if let Some(Op::SoftmaxCrossEntropy { loss_id, .. }) = self.ops.last() {
+            grads[*loss_id] = vec![1.0f32];
         }
 
         // Process operations in reverse order

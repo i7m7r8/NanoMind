@@ -5,6 +5,13 @@
 
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_long_first_doc_paragraph)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::explicit_counter_loop)]
+#![allow(clippy::new_without_default)]
+#![allow(dead_code)]
+#![allow(unused_variables)]
+#![allow(unused_mut)]
+#![allow(unused_imports)]
 
 pub mod autodiff;
 pub mod config;
