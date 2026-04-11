@@ -1,0 +1,116 @@
+name: Train (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      steps:
+        description: 'Training steps (more = better quality, longer time)'
+        required: true
+        default: '1000'
+      lr:
+        description: 'Learning rate'
+        required: true
+        default: '0.001'
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "train"
+
+      - name: Download training data
+        run: |
+          # Use a simple public domain text corpus for training
+          # Project Gutenberg: Alice in Wonderland (public domain)
+          curl -sL "https://www.gutenberg.org/cache/epub/11/pg11.txt" -o data/alice.txt
+          # Also add Shakespeare (public domain)
+          curl -sL "https://www.gutenberg.org/cache/epub/100/pg100.txt" -o data/shakespeare.txt
+          mkdir -p data
+          cat data/alice.txt data/shakespeare.txt > data/corpus.txt 2>/dev/null || true
+          echo "Corpus size: $(wc -c < data/corpus.txt 2>/dev/null || echo 'using built-in') bytes"
+
+      - name: Train model
+        run: |
+          echo "=== Starting Training ==="
+          echo "Steps: ${{ github.event.inputs.steps }}"
+          echo "Learning rate: ${{ github.event.inputs.lr }}"
+
+          # Build the trainer
+          cargo build --release --package nanomind-trainer
+
+          # Run training
+          cargo run --release --package nanomind-trainer -- \
+            train \
+            --steps ${{ github.event.inputs.steps }} \
+            --lr ${{ github.event.inputs.lr }} \
+            --vocab 260 \
+            --hidden 128 \
+            --layers 4 \
+            --heads 4 \
+            --seq-len 32 \
+            --out nanomind-model.gguf
+
+      - name: Package GGUF model
+        run: |
+          mkdir -p release
+          cp nanomind-model.gguf release/nanomind-model.gguf 2>/dev/null || true
+          # Also package the Modelfile
+          cat > release/Modelfile << 'EOF'
+          FROM ./nanomind-model.gguf
+
+          PARAMETER temperature 0.7
+          PARAMETER top_p 0.9
+          PARAMETER top_k 40
+          PARAMETER repeat_penalty 1.1
+          PARAMETER num_ctx 256
+          PARAMETER stop "<|eos|>"
+
+          SYSTEM """You are NanoMind, a small AI assistant trained from scratch in pure Rust."""
+          EOF
+
+          # Create tar with model + Modelfile
+          cd release
+          tar czf nanomind-trained.tar.gz nanomind-model.gguf Modelfile 2>/dev/null || true
+          sha256sum nanomind-trained.tar.gz > nanomind-trained.tar.gz.sha256 2>/dev/null || true
+
+      - name: Upload GGUF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanomind-trained-gguf
+          path: |
+            release/nanomind-model.gguf
+            release/Modelfile
+            release/nanomind-trained.tar.gz
+            release/nanomind-trained.tar.gz.sha256
+          retention-days: 30
+
+      - name: Upload to GitHub Release (if tag exists)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/nanomind-model.gguf
+            release/Modelfile
+            release/nanomind-trained.tar.gz
+          generate_release_notes: true
+
+      - name: Training summary
+        if: always()
+        run: |
+          echo "=== Training Complete ==="
+          if [ -f release/nanomind-model.gguf ]; then
+            echo "Model size: $(du -h release/nanomind-model.gguf | cut -f1)"
+            echo "Upload as GitHub Release or download from Actions artifacts"
+          else
+            echo "Warning: Model file not found"
+          fi
