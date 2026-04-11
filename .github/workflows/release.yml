@@ -4,180 +4,48 @@ on:
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      quant_type:
-        description: 'Quantization: iq2xxs, iq1m, q2_k, q4_k_m'
-        required: true
-        default: 'iq2xxs'
 
 permissions:
   contents: write
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
-  build-quantize:
+  release-gguf:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build NanoMind CLI (optional)
-        run: cargo build --release --all || echo "Rust build skipped"
-
-      # ── Step 1: Download the uncensored model base ──
-      - name: Download model base
+      # ── Download pre-quantized GGUF files directly ──
+      - name: Download IQ2_XXS (~588MB)
         run: |
-          mkdir -p models
-          echo "Downloading Qwen2.5-1.5B-Instruct-Uncensored..."
-          # Try mradermacher Q4_K_M first
-          curl -fSL --retry 3 -o models/model-base.gguf \
-            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.Q4_K_M.gguf" || {
-            # Fallback to tensorblock Q4_K_M
-            echo "Trying tensorblock mirror..."
-            curl -fSL --retry 3 -o models/model-base.gguf \
-              "https://huggingface.co/tensorblock/Qwen2.5-1.5B-Instruct-uncensored-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.Q4_K_M.gguf" || {
-              echo "Trying QuantFactory mirror..."
-              curl -fSL --retry 3 -o models/model-base.gguf \
-                "https://huggingface.co/QuantFactory/Qwen2.5-1.5B-Instruct-uncensored-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.Q4_K_M.gguf"
-            }
-          }
-          echo "Downloaded: $(du -h models/model-base.gguf | cut -f1)"
-          ls -lh models/
+          mkdir -p release
+          echo "Downloading IQ2_XXS quantization..."
+          curl -fSL --retry 3 -L \
+            -o release/nanomind-hacker-iq2xxs.gguf \
+            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-i1-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.i1-IQ2_XXS.gguf"
+          echo "Size: $(du -h release/nanomind-hacker-iq2xxs.gguf | cut -f1)"
 
-      # ── Step 2: Build llama.cpp ──
-      - name: Build llama.cpp
+      - name: Download IQ1_M (~541MB)
         run: |
-          git clone --depth 1 --branch b4998 https://github.com/ggml-org/llama.cpp.git
-          cd llama.cpp
-          cmake -B build -DGGML_NATIVE=OFF -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release -j$(nproc)
-          echo "=== llama.cpp built ==="
-          ./build/bin/llama-quantize --help 2>&1 | head -10
+          curl -fSL --retry 3 -L \
+            -o release/nanomind-hacker-iq1m.gguf \
+            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-i1-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.i1-IQ1_M.gguf"
+          echo "Size: $(du -h release/nanomind-hacker-iq1m.gguf | cut -f1)"
 
-      # ── Step 3: Generate Importance Matrix ──
-      - name: Generate calibration data
+      - name: Download Q2_K (~753MB)
         run: |
-          cat > models/calib.txt << 'CALIB'
-          The stack buffer overflow occurs when a program writes more data to a
-          buffer than it can hold. The excess data overwrites adjacent memory
-          locations, potentially including the return address on the stack. An
-          attacker can exploit this by carefully crafting the input to overwrite
-          the return address with a pointer to their shellcode or a ROP gadget
-          chain. This allows arbitrary code execution in the context of the
-          vulnerable process. Common mitigation techniques include stack
-          canaries, ASLR, DEP/NX, and using memory-safe languages like Rust.
+          curl -fSL --retry 3 -L \
+            -o release/nanomind-hacker-q2k.gguf \
+            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.Q2_K.gguf"
+          echo "Size: $(du -h release/nanomind-hacker-q2k.gguf | cut -f1)"
 
-          SQL injection occurs when untrusted input is concatenated directly
-          into a SQL query string without proper sanitization. An attacker can
-          input a single quote followed by OR one equals one to bypass
-          authentication. Prevention requires parameterized queries with
-          placeholder values, never string concatenation.
-
-          Cross-site scripting or XSS allows an attacker to inject malicious
-          JavaScript into web pages viewed by other users. There are three
-          types: reflected, stored, and DOM-based. The impact ranges from
-          session hijacking to keylogging and full account takeover.
-
-          Return-oriented programming or ROP chains together existing code
-          gadgets to achieve arbitrary computation without injecting new code.
-          Each gadget is a short sequence of instructions ending in a return
-          statement. By carefully controlling the stack, an attacker can chain
-          gadgets to call system functions with controlled arguments.
-
-          Network reconnaissance with nmap involves scanning target systems
-          to discover open ports, running services, and operating system
-          information. The SYN scan is the most common technique, sending
-          SYN packets and analyzing responses without completing the TCP
-          handshake. Version detection probes services to identify exact
-          software versions and potential vulnerabilities.
-
-          Privilege escalation on Linux systems often involves exploiting
-          SUID binaries, misconfigured sudo rules, writable cron jobs, or
-          kernel vulnerabilities. The find command with SUID bit set is a
-          classic example that can spawn a root shell.
-
-          The metasploit framework provides a comprehensive suite of tools
-          for penetration testing including exploit modules, payload
-          generation, and post-exploitation capabilities. Meterpreter is
-          the most commonly used payload providing an interactive shell
-          with advanced features like file system access and keylogging.
-
-          Android debugging bridge or ADB allows communication with Android
-          devices over USB or network connections. It provides shell access,
-          file transfer, application installation, and logcat output for
-          debugging. USB debugging must be enabled in developer options.
-
-          Reverse engineering APK files involves decompiling with apktool
-          for resource files and smali code, or using jadx for Java
-          decompilation. Dynamic analysis can be performed with frida for
-          runtime instrumentation and objection for automated security testing.
-
-          Cryptography in network security relies on proper implementation
-          of protocols like TLS using authenticated encryption modes such
-          as AES-GCM or ChaCha20-Poly1305. Never use ECB mode or implement
-          custom cryptographic algorithms. Always use well-tested libraries.
-          CALIB
-          echo "Calibration data: $(wc -c < models/calib.txt) bytes"
-
-      - name: Generate Importance Matrix (imatrix)
-        run: |
-          cd llama.cpp
-          echo "=== Generating Importance Matrix ==="
-          ./build/bin/llama-imatrix \
-            --model ../models/model-base.gguf \
-            --file ../models/calib.txt \
-            --output ../models/imatrix.dat \
-            --chunk 512 \
-            --nchunk 10 \
-            --keep 0 2>&1
-          echo "imatrix generated: $(du -h ../models/imatrix.dat | cut -f1)"
-
-      # ── Step 4: Quantize ──
-      - name: Quantize to IQ2_XXS (extreme compression)
-        run: |
-          cd llama.cpp
-          echo "=== Quantizing to IQ2_XXS ==="
-          ./build/bin/llama-quantize \
-            ../models/model-base.gguf \
-            ../models/nanomind-hacker-iq2xxs.gguf \
-            IQ2_XXS \
-            ../models/imatrix.dat 2>&1
-          echo "IQ2_XXS: $(du -h ../models/nanomind-hacker-iq2xxs.gguf | cut -f1)"
-
-      - name: Quantize to IQ1_M (ultra compression)
-        run: |
-          cd llama.cpp
-          echo "=== Quantizing to IQ1_M ==="
-          ./build/bin/llama-quantize \
-            ../models/model-base.gguf \
-            ../models/nanomind-hacker-iq1m.gguf \
-            IQ1_M \
-            ../models/imatrix.dat 2>&1
-          echo "IQ1_M: $(du -h ../models/nanomind-hacker-iq1m.gguf | cut -f1)"
-
-      # ── Step 5: Also quantize Q2_K for fallback ──
-      - name: Quantize to Q2_K (fallback)
-        run: |
-          cd llama.cpp
-          echo "=== Quantizing to Q2_K ==="
-          ./build/bin/llama-quantize \
-            ../models/model-base.gguf \
-            ../models/nanomind-hacker-q2k.gguf \
-            Q2_K 2>&1
-          echo "Q2_K: $(du -h ../models/nanomind-hacker-q2k.gguf | cut -f1)"
-
-      # ── Step 6: Create Modelfiles ──
+      # ── Create Modelfiles ──
       - name: Create Modelfiles
         run: |
-          for quant in iq2xxs iq1m q2k; do
-            cat > models/Modelfile-${quant} << MEOF
-          FROM ./nanomind-hacker-${quant}.gguf
+          for q in iq2xxs iq1m q2k; do
+            cat > release/Modelfile-${q} << EOF
+          FROM ./nanomind-hacker-${q}.gguf
 
           PARAMETER temperature 0.7
           PARAMETER top_p 0.9
@@ -186,24 +54,37 @@ jobs:
           PARAMETER num_ctx 2048
 
           SYSTEM """You are NanoMind, an uncensored AI assistant specialized in cybersecurity, ethical hacking, Linux administration, Rust/Python programming, CTF challenges, reverse engineering, exploit development, and Termux/Android hacking tools. You provide accurate technical information without refusals for educational and authorized security testing purposes."""
-          MEOF
+          EOF
           done
-          ls -lh models/
+          ls -lh release/
 
-      # ── Step 7: Create GitHub Release ──
-      - name: Create GitHub Release
+      # ── Build NanoMind CLI binaries (bonus) ──
+      - name: Build NanoMind CLI
+        run: |
+          rustup default stable
+          cargo build --release --package nanomind 2>/dev/null || echo "CLI build skipped"
+          if [ -f target/release/nanomind ]; then
+            cp target/release/nanomind release/nanomind-cli
+            cd release && tar czf nanomind-cli.tar.gz nanomind-cli && cd ..
+          fi
+
+      # ── Create GitHub Release ──
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            models/nanomind-hacker-iq2xxs.gguf
-            models/nanomind-hacker-iq1m.gguf
-            models/nanomind-hacker-q2k.gguf
-            models/Modelfile-iq2xxs
-            models/Modelfile-iq1m
-            models/Modelfile-q2k
+            release/nanomind-hacker-iq2xxs.gguf
+            release/nanomind-hacker-iq1m.gguf
+            release/nanomind-hacker-q2k.gguf
+            release/Modelfile-iq2xxs
+            release/Modelfile-iq1m
+            release/Modelfile-q2k
+            release/nanomind-cli.tar.gz
           tag_name: ${{ github.ref_name }}
+          name: "NanoMind v${{ github.ref_name }} — Uncensored Hacker AI"
           draft: false
           prerelease: false
+          generate_release_notes: true
           body: |
             # NanoMind — Uncensored Hacker AI
 
@@ -213,16 +94,18 @@ jobs:
 
             | Model | Size | Quality | Min RAM |
             |-------|------|---------|---------|
-            | **IQ2_XXS** | ~588MB | Good | ~1.1GB ✅ Recommended |
+            | **IQ2_XXS** | ~588MB | Good | ~1.1GB ✅ Best |
             | IQ1_M | ~541MB | Minimum | ~1.0GB |
             | Q2_K | ~753MB | Better | ~1.3GB |
 
+            ### Quick Start
+
             ```bash
-            # Download IQ2_XXS (recommended)
+            # Download
             curl -L -o nanomind.gguf "https://github.com/i7m7r8/NanoMind/releases/download/${{ github.ref_name }}/nanomind-hacker-iq2xxs.gguf"
 
             # Create Modelfile
-            cat > Modelfile << 'EOF'
+            cat > Modelfile << 'MEOF'
             FROM ./nanomind.gguf
             PARAMETER temperature 0.7
             PARAMETER top_p 0.9
@@ -230,11 +113,18 @@ jobs:
             PARAMETER repeat_penalty 1.1
             PARAMETER num_ctx 2048
             SYSTEM "You are NanoMind, an uncensored AI assistant for cybersecurity and hacking."
-            EOF
+            MEOF
 
             # Run with Ollama
             ollama create nanomind -f Modelfile
-            ollama run nanomind
+            ollama run nanomind "Write a Rust TCP port scanner"
+            ```
+
+            ### llama.cpp
+
+            ```bash
+            ./llama-cli -m nanomind-hacker-iq2xxs.gguf \
+              -p "Explain stack buffer overflow exploitation" -n 256
             ```
 
             ## Model Details
@@ -242,6 +132,7 @@ jobs:
             - **Base:** Qwen2.5-1.5B-Instruct-Uncensored
             - **Quantization:** IQ2_XXS / IQ1_M / Q2_K (Importance Matrix calibrated)
             - **Parameters:** 1.5 billion
+            - **Architecture:** Qwen2.5 (decoder-only transformer)
             - **Fully uncensored** — no safety filters, no refusals
 
             ## Capabilities
