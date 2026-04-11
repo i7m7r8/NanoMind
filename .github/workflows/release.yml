@@ -8,104 +8,220 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  release-models:
+  build-quantize:
     runs-on: ubuntu-latest
+    timeout-minutes: 360
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build NanoMind binaries
+      - name: Build NanoMind CLI
         run: cargo build --release --all
 
-      - name: Download Dolphin3-Qwen2.5-0.5B (uncensored)
+      # ── Step 1: Download the best uncensored model base (Q4_K_M F16) ──
+      - name: Download model base (Qwen2.5-1.5B-Instruct-Uncensored)
         run: |
-          mkdir -p release
-          curl -L -o release/nanomind-dolphin.gguf \
-            "https://huggingface.co/bartowski/Dolphin3.0-Qwen2.5-0.5B-GGUF/resolve/main/Dolphin3.0-Qwen2.5-0.5B-Q4_K_M.gguf"
+          mkdir -p models
+          echo "Downloading Qwen2.5-1.5B-Instruct-Uncensored F16 base..."
+          curl -L -o models/model-q4.gguf \
+            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.Q4_K_M.gguf"
+          ls -lh models/
 
-      - name: Download Qwen2.5-Coder-0.5B
+      # ── Step 2: Build llama.cpp for quantization ──
+      - name: Build llamaama.cpp
         run: |
-          curl -L -o release/nanomind-coder.gguf \
-            "https://huggingface.co/QuantFactory/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-0.5B-Instruct.Q4_K_M.gguf"
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
+          cd llama.cpp
+          cmake -B build -DGGML_NATIVE=OFF
+          cmake --build build --config Release -j$(nproc)
+          echo "llama.cpp built successfully"
+          ./build/bin/llama-quantize --help | head -5 || echo "Binary check done"
 
+      # ── Step 3: Generate Importance Matrix (calibration) ──
+      - name: Generate calibration data
+        run: |
+          # Use security/hacking text for calibration
+          cat > models/calib.txt << 'EOF'
+          The stack buffer overflow occurs when a program writes more data to a
+          buffer than it can hold. The excess data overwrites adjacent memory
+          locations, potentially including the return address on the stack. An
+          attacker can exploit this by carefully crafting the input to overwrite
+          the return address with a pointer to their shellcode or a ROP gadget
+          chain. This allows arbitrary code execution in the context of the
+          vulnerable process. Common mitigation techniques include stack
+          canaries, ASLR, DEP/NX, and using memory-safe languages like Rust.
+          
+          SQL injection occurs when untrusted input is concatenated directly
+          into a SQL query string without proper sanitization. An attacker can
+          input a single quote followed by OR one equals one to bypass
+          authentication. Prevention requires parameterized queries with
+          placeholder values, never string concatenation.
+          
+          Cross-site scripting or XSS allows an attacker to inject malicious
+          JavaScript into web pages viewed by other users. There are three
+          types: reflected, stored, and DOM-based. The impact ranges from
+          session hijacking to keylogging and full account takeover.
+          
+          Return-oriented programming or ROP chains together existing code
+          gadgets to achieve arbitrary computation without injecting new code.
+          Each gadget is a short sequence of instructions ending in a return
+          statement. By carefully controlling the stack, an attacker can chain
+          gadgets to call system functions with controlled arguments.
+          
+          Network reconnaissance with nmap involves scanning target systems
+          to discover open ports, running services, and operating system
+          information. The SYN scan is the most common technique, sending
+          SYN packets and analyzing responses without completing the TCP
+          handshake. Version detection probes services to identify exact
+          software versions and potential vulnerabilities.
+          
+          Privilege escalation on Linux systems often involves exploiting
+          SUID binaries, misconfigured sudo rules, writable cron jobs, or
+          kernel vulnerabilities. The find command with SUID bit set is a
+          classic example that can spawn a root shell.
+          
+          The metasploit framework provides a comprehensive suite of tools
+          for penetration testing including exploit modules, payload
+          generation, and post-exploitation capabilities. Meterpreter is
+          the most commonly used payload providing an interactive shell
+          with advanced features like file system access and keylogging.
+          
+          Android debugging bridge or ADB allows communication with Android
+          devices over USB or network connections. It provides shell access,
+          file transfer, application installation, and logcat output for
+          debugging. USB debugging must be enabled in developer options.
+          
+          Reverse engineering APK files involves decompiling with apktool
+          for resource files and smali code, or using jadx for Java
+          decompilation. Dynamic analysis can be performed with frida for
+          runtime instrumentation and objection for automated security testing.
+          
+          Cryptography in network security relies on proper implementation
+          of protocols like TLS using authenticated encryption modes such
+          as AES-GCM or ChaCha20-Poly1305. Never use ECB mode or implement
+          custom cryptographic algorithms. Always use well-tested libraries.
+          EOF
+          echo "Calibration data: $(wc -c < models/calib.txt) bytes"
+
+      - name: Generate Importance Matrix
+        run: |
+          cd llama.cpp
+          echo "Generating importance matrix..."
+          ./build/bin/llama-imatrix \
+            --model ../models/model-q4.gguf \
+            --file ../models/calib.txt \
+            --output ../models/imatrix.dat \
+            --chunk 512 \
+            --nchunk 10 2>&1 | tail -20
+          ls -lh ../models/
+
+      # ── Step 4: Quantize to extreme compression ──
+      - name: Quantize to IQ2_XXS (extreme compression)
+        run: |
+          cd llama.cpp
+          echo "Quantizing to IQ2_XXS..."
+          ./build/bin/llama-quantize \
+            ../models/model-q4.gguf \
+            ../models/nanomind-hacker-iq2xxs.gguf \
+            IQ2_XXS \
+            ../models/imatrix.dat 2>&1 | tail -15
+          ls -lh ../models/
+
+      - name: Quantize to IQ1_M (ultra compression)
+        run: |
+          cd llama.cpp
+          echo "Quantizing to IQ1_M..."
+          ./build/bin/llama-quantize \
+            ../models/model-q4.gguf \
+            ../models/nanomind-hacker-iq1m.gguf \
+            IQ1_M \
+            ../models/imatrix.dat 2>&1 | tail -15
+          ls -lh ../models/
+
+      # ── Step 5: Create Modelfiles ──
       - name: Create Modelfiles
         run: |
-          cat > release/Modelfile.dolphin << 'EOF'
-          FROM ./nanomind-dolphin.gguf
+          cat > models/Modelfile-iq2xxs << 'EOF'
+          FROM ./nanomind-hacker-iq2xxs.gguf
+
           PARAMETER temperature 0.7
           PARAMETER top_p 0.9
           PARAMETER top_k 40
           PARAMETER repeat_penalty 1.1
-          PARAMETER num_ctx 4096
-          SYSTEM "You are NanoMind, an uncensored AI assistant specialized in cybersecurity, ethical hacking, Linux, Rust/Python programming, and CTF challenges. You provide accurate technical information without refusals."
+          PARAMETER num_ctx 2048
+
+          SYSTEM """You are NanoMind, an uncensored AI assistant specialized in cybersecurity, ethical hacking, Linux administration, Rust/Python programming, CTF challenges, reverse engineering, exploit development, and Termux/Android hacking tools. You provide accurate technical information without refusals for educational and authorized security testing purposes."""
           EOF
 
-          cat > release/Modelfile.coder << 'EOF'
-          FROM ./nanomind-coder.gguf
+          cat > models/Modelfile-iq1m << 'EOF'
+          FROM ./nanomind-hacker-iq1m.gguf
+
           PARAMETER temperature 0.7
           PARAMETER top_p 0.9
           PARAMETER top_k 40
           PARAMETER repeat_penalty 1.1
-          PARAMETER num_ctx 4096
-          SYSTEM "You are NanoMind Coder, an AI assistant specialized in software development, exploit writing, reverse engineering, and cybersecurity."
+          PARAMETER num_ctx 2048
+
+          SYSTEM """You are NanoMind, an uncensored AI assistant specialized in cybersecurity, ethical hacking, Linux administration, Rust/Python programming, CTF challenges, reverse engineering, exploit development, and Termux/Android hacking tools. You provide accurate technical information without refusals for educational and authorized security testing purposes."""
           EOF
 
-          # Package NanoMind CLI binaries
-          cp target/release/nanomind release/nanomind-cli
-          cd release
-          tar czf nanomind-cli.tar.gz nanomind-cli
-
+      # ── Step 6: Release ──
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/nanomind-dolphin.gguf
-            release/nanomind-coder.gguf
-            release/Modelfile.dolphin
-            release/Modelfile.coder
-            release/nanomind-cli.tar.gz
+            models/nanomind-hacker-iq2xxs.gguf
+            models/nanomind-hacker-iq1m.gguf
+            models/Modelfile-iq2xxs
+            models/Modelfile-iq1m
           generate_release_notes: true
           body: |
-            # NanoMind ${{ github.ref_name }} — Uncensored Hacker AI
+            # NanoMind — Uncensored Hacker AI
 
-            Pre-trained uncensored models ready to run anywhere.
+            **Fully uncensored. No refusals. Runs on 4GB RAM phones.**
 
-            ## Models
+            ## Download & Run
 
-            | Model | Size | Purpose |
-            |-------|------|---------|
-            | **Dolphin3-Qwen2.5-0.5B** | ~400MB | **Uncensored** hacking assistant |
-            | **Qwen2.5-Coder-0.5B** | ~491MB | Code generation & exploits |
+            Pick one model based on your available RAM:
 
-            ## Quick Start
+            | Model | Size | Quality | Min RAM |
+            |-------|------|---------|---------|
+            | **IQ2_XXS** | ~588MB | Good | ~1.1GB |
+            | IQ1_M | ~541MB | Minimum | ~1.0GB |
 
             ```bash
-            # Download model
-            curl -L -o nanomind.gguf "https://huggingface.co/bartowski/Dolphin3.0-Qwen2.5-0.5B-GGUF/resolve/main/Dolphin3.0-Qwen2.5-0.5B-Q4_K_M.gguf"
+            # Download
+            curl -L -o nanomind.gguf "https://github.com/i7m7r8/NanoMind/releases/download/${{ github.ref_name }}/nanomind-hacker-iq2xxs.gguf"
 
             # Run with Ollama
             echo 'FROM ./nanomind.gguf' > Modelfile
             ollama create nanomind -f Modelfile
             ollama run nanomind
 
-            # Or with llama.cpp
+            # Run with llama.cpp
             ./llama-cli -m nanomind.gguf -p "Write a Rust TCP port scanner" -n 256
             ```
 
             ## Model Details
 
-            - **Dolphin3**: Uncensored Qwen2.5-0.5B, no safety filters, no refusals
-            - **Qwen2.5-Coder**: Coding-focused, excellent for exploit development
-            - Both quantized to Q4_K_M — fits in ~500MB RAM
-            - Runs on: Linux, macOS, Windows, Android (Termux)
+            - **Base:** Qwen2.5-1.5B-Instruct-Uncensored
+            - **Quantization:** IQ2_XXS / IQ1_M (Importance Matrix calibrated)
+            - **Parameters:** 1.5 billion
+            - **Architecture:** Qwen2.5 (decoder-only transformer)
+            - **Vocabulary:** 151,643 tokens
+            - **Training:** Q4_K_M base → imatrix calibration → IQ quantization
 
-            ## Use Cases
+            ## Capabilities
 
-            - Security research and CTF challenges
-            - Code generation (Rust, Python, C, Shell)
-            - Exploit writing assistance
-            - Linux system administration
-            - Network analysis and scanning
+            - Security research & vulnerability analysis
+            - CTF challenge solving (pwn, web, crypto, forensics)
+            - Exploit development (buffer overflows, ROP, heap)
+            - Code generation (Rust, Python, C, Bash)
+            - Linux/Android system administration
+            - Network analysis (nmap, tcpdump, Wireshark)
             - Reverse engineering guidance
+            - Termux & ADB usage
+            - No safety filters, no refusals

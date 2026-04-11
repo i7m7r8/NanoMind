@@ -17,3 +17,12 @@ target/
 .DS_Store
 Thumbs.db
 *.gguf
+*.ckpt
+*.txt
+data/raw/
+data/corpus.txt
+data/instruct.txt
+models/
+release/
+llama.cpp/
+*.gguf

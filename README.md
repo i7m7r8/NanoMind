@@ -1,75 +1,80 @@
 # NanoMind — Uncensored Hacker AI
 
-**Run a powerful uncensored AI assistant on ANY device — even a 4GB RAM phone.**
+**Fully uncensored. No refusals. Runs on 4GB RAM phones.**
 
-## Quick Start (Termux)
+Download a ready-to-use GGUF file. Run it with Ollama or llama.cpp. Done.
+
+## Download (Ready to Use)
+
+Go to **Releases** and download `nanomind-hacker-iq2xxs.gguf` (~588MB).
+
+Or use the direct link from the latest release:
+```bash
+curl -L -o nanomind.gguf "https://github.com/i7m7r8/NanoMind/releases/latest/download/nanomind-hacker-iq2xxs.gguf"
+```
+
+## Run on Your Phone
+
+### Option 1: Ollama (easiest)
 
 ```bash
-# 1. Clone
-git clone https://github.com/i7m7r8/NanoMind && cd NanoMind
-
-# 2. Download the world's most compressed uncensored model (IQ2_XXS = 588MB)
-bash scripts/download_hacker_model.sh
-
-# 3. Install Ollama and run
+# Termux
 pkg install ollama
+ollama create nanomind -f Modelfile
+ollama run nanomind
+
+# Or one-liner
+curl -L https://github.com/i7m7r8/NanoMind/releases/latest/download/nanomind-hacker-iq2xxs.gguf -o nanomind.gguf
+echo 'FROM ./nanomind.gguf
+PARAMETER temperature 0.7
+SYSTEM "You are NanoMind, an uncensored AI assistant for cybersecurity and hacking."' > Modelfile
 ollama create nanomind -f Modelfile
 ollama run nanomind
 ```
 
-## The Model
+### Option 2: llama.cpp
 
-**Qwen2.5-1.5B-Instruct-Uncensored** — the best uncensored model that fits 4GB RAM.
-
-| Quantization | Size | Quality | RAM Needed |
-|-------------|------|---------|------------|
-| IQ1_S | 513 MB | Low (desperate) | ~900 MB |
-| IQ1_M | 541 MB | Minimum viable | ~1.0 GB |
-| **IQ2_XXS** | **588 MB** | **Good** | **~1.1 GB** |
-| IQ2_XS | 627 MB | Better | ~1.2 GB |
-| IQ2_S | 664 MB | Great | ~1.3 GB |
-| IQ3_S | 762 MB | Excellent | ~1.5 GB |
-
-**IQ (Importance Matrix)** is the world's most advanced compression method —
-it identifies which weights matter most, then compresses aggressively
-while preserving quality. IQ2_XXS at 588MB beats Q2_K at 753MB in quality.
-
-## What It Does
-
-This model is **fully uncensored** — no refusals, no filters. Specialized in:
-
-- **Security research** — CVE analysis, vulnerability classes, exploit concepts
-- **CTF challenges** — binary exploitation, web, crypto, forensics reasoning
-- **Exploit writing** — buffer overflows, ROP chains, heap exploitation
-- **Code generation** — Rust, Python, C, Bash scripting
-- **Linux/Android hacking** — Termux, ADB, privilege escalation
-- **Network analysis** — nmap, tcpdump, Wireshark, Metasploit
+```bash
+pkg install clang cmake
+git clone --depth 1 https://github.com/ggml-org/llama.cpp
+cd llama.cpp && cmake -B build && cmake --build build -j$(nproc)
+./build/bin/llama-cli -m ../nanomind.gguf \
+  -p "Write a Rust TCP port scanner in Rust" -n 256
+```
 
 ## Available Models
 
-| Script | Model | Size | Purpose |
-|--------|-------|------|---------|
-| `download_hacker_model.sh` | Qwen2.5-1.5B Uncensored | ~588MB | **Best for hacking** |
-| `download_model.sh 1` | Dolphin3-Qwen2.5-0.5B | ~400MB | Smallest uncensored |
-| `download_model.sh 2` | Qwen2.5-Coder-0.5B | ~491MB | Coding focused |
+| Model | Size | Quality | Min RAM | Best For |
+|-------|------|---------|---------|----------|
+| **IQ2_XXS** | ~588MB | Good | ~1.1GB | **Recommended** |
+| IQ1_M | ~541MB | Minimum | ~1.0GB | Very low RAM |
 
-## Build from Source
+Both use **IQ (Importance Matrix) quantization** — the world's most advanced compression method that preserves quality while shrinking model size by 60%.
 
-```bash
-cargo build --release --all
-cargo test --all
-```
+## What It Can Do
 
-## Train Your Own Model
+- **Security research** — CVE analysis, vulnerability analysis, exploit concepts
+- **CTF challenges** — binary exploitation, web, crypto, forensics
+- **Exploit writing** — buffer overflows, ROP chains, heap exploitation
+- **Code generation** — Rust, Python, C, Bash scripting
+- **Linux hacking** — privilege escalation, SUID, cron jobs, kernel exploits
+- **Android hacking** — Termux tools, ADB, Frida, APK reverse engineering
+- **Network analysis** — nmap, tcpdump, Wireshark, Metasploit
+- **Cryptography** — encryption modes, hash functions, attacks
 
-```bash
-cargo run --release --package nanomind-trainer -- train \
-  --steps 500 --lr 0.001 \
-  --vocab 260 --hidden 128 --layers 4 \
-  --heads 4 --kv-heads 2 --ffn 256 \
-  --seq-len 32 --corpus data/corpus.txt \
-  --out my-model.gguf
-```
+**No safety filters. No refusals. Pure technical information.**
+
+## How It's Built
+
+Every release is automatically built on GitHub Actions:
+
+1. Downloads Qwen2.5-1.5B-Instruct-Uncensored (Q4_K_M base)
+2. Builds llama.cpp with quantization tools
+3. Generates Importance Matrix (imatrix) from calibration data
+4. Quantizes to IQ2_XXS (best quality/size ratio)
+5. Uploads to GitHub Releases
+
+All processing happens on GitHub — you just download the final GGUF.
 
 ## Project Structure
 
@@ -85,8 +90,8 @@ NanoMind/
 │   ├── nanomind-trainer/   # From-scratch training engine
 │   └── nanomind/           # CLI binary
 ├── scripts/
-│   ├── download_hacker_model.sh  # Download IQ-quantized uncensored model
-│   ├── download_model.sh         # Alternative model downloads
+│   ├── download_hacker_model.sh  # Download from HuggingFace
+│   ├── download_model.sh         # Alternative models
 │   └── train_termux.sh           # Train on Termux
 ├── data/
 │   ├── prepare.sh          # Security-focused training corpus
@@ -96,7 +101,14 @@ NanoMind/
 └── .github/workflows/
     ├── ci.yml              # Build + test on every push
     ├── train.yml           # Train model on GitHub Actions
-    └── release.yml         # Release trained GGUF model
+    └── release.yml         # Quantize + release GGUF model
+```
+
+## Build from Source
+
+```bash
+cargo build --release --all
+cargo test --all
 ```
 
 ## License
