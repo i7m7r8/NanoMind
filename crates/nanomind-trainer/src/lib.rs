@@ -6,12 +6,14 @@
 #![allow(clippy::needless_range_loop)]
 #![allow(clippy::too_long_first_doc_paragraph)]
 
+pub mod autodiff;
 pub mod config;
 pub mod data_loader;
 pub mod model;
 pub mod optimizer;
 pub mod train;
 
+pub use autodiff::Tape;
 pub use config::ModelConfig;
 pub use data_loader::DataLoader;
 pub use model::TransformerModel;

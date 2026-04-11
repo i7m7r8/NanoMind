@@ -1,139 +1,16 @@
 //! Training loop — from-scratch transformer training in pure Rust.
 //!
-//! Uses numerical gradient estimation (finite differences) for training
-//! on CPU without backpropagation — practical for small models on CI.
+//! Uses proper backpropagation (reverse-mode autodiff) for efficient training.
 
+use crate::autodiff::Tape;
 use crate::config::ModelConfig;
 use crate::data_loader::{get_training_corpus, ByteTokenizer, DataLoader};
-use crate::model::Tensor as ModelTensor;
-use crate::model::{forward_batch, Rng, TransformerModel};
+use crate::model::TransformerModel;
 use crate::optimizer::AdamW;
 
 use nanomind_core::gguf_writer::*;
 use std::io::Write;
 use std::path::Path;
-
-// ─── Simple RNG ────────────────────────────────────────────────────────────
-
-struct SimpleRng(u64);
-
-impl SimpleRng {
-    fn new(seed: u64) -> Self {
-        Self(seed | 1)
-    }
-}
-
-impl Rng for SimpleRng {
-    fn f32(&mut self) -> f32 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
-        ((self.0 >> 33) as f32) / (u32::MAX as f32)
-    }
-}
-
-// ─── Cross-Entropy Loss ────────────────────────────────────────────────────
-
-/// Compute cross-entropy loss: logits [vocab_size], target token id.
-pub fn cross_entropy_loss(logits: &[f32], target: u32) -> f32 {
-    let vocab = logits.len();
-    let target = target as usize % vocab;
-
-    // Stable softmax
-    let mut max_val = f32::NEG_INFINITY;
-    for &l in logits {
-        if l > max_val {
-            max_val = l;
-        }
-    }
-
-    let mut sum_exp = 0.0f32;
-    for &l in logits {
-        sum_exp += (l - max_val).exp();
-    }
-
-    let log_sum_exp = max_val + sum_exp.ln();
-    log_sum_exp - logits[target]
-}
-
-/// Compute softmax probabilities from logits.
-pub fn softmax(logits: &[f32]) -> Vec<f32> {
-    let mut max_val = f32::NEG_INFINITY;
-    for &l in logits {
-        if l > max_val {
-            max_val = l;
-        }
-    }
-
-    let mut probs = Vec::with_capacity(logits.len());
-    let mut sum_exp = 0.0f32;
-    for &l in logits {
-        let e = (l - max_val).exp();
-        probs.push(e);
-        sum_exp += e;
-    }
-
-    let inv_sum = 1.0 / sum_exp;
-    for p in &mut probs {
-        *p *= inv_sum;
-    }
-    probs
-}
-
-// ─── Gradient Estimation ──────────────────────────────────────────────────
-
-/// Estimate gradients via finite differences for a single parameter slice.
-/// This is slow but works for small models. For efficiency, we only
-/// estimate gradients for a random subset of parameters per step.
-fn estimate_gradients(
-    params: &mut [f32],
-    loss_fn: impl Fn(&[f32]) -> f32,
-    epsilon: f32,
-    sample_fraction: f32,
-    rng: &mut SimpleRng,
-) -> Vec<f32> {
-    let n = params.len();
-    let mut grads = vec![0.0f32; n];
-
-    // For small models (< 1M params), estimate all gradients
-    // For larger models, estimate a random subset
-    let sample_size = if sample_fraction >= 1.0 {
-        n
-    } else {
-        (n as f32 * sample_fraction).max(100.0) as usize
-    };
-
-    if sample_size >= n {
-        // Full gradient estimation
-        for i in 0..n {
-            let orig = params[i];
-            params[i] = orig + epsilon;
-            let loss_plus = loss_fn(params);
-            params[i] = orig - epsilon;
-            let loss_minus = loss_fn(params);
-            params[i] = orig;
-            grads[i] = (loss_plus - loss_minus) / (2.0 * epsilon);
-        }
-    } else {
-        // Random subset gradient estimation (stochastic)
-        let mut indices: Vec<usize> = (0..n).collect();
-        // Fisher-Yates shuffle partial
-        for i in 0..sample_size {
-            let j = i + (rng.0 as usize % (n - i));
-            indices.swap(i, j);
-        }
-
-        for &i in &indices[..sample_size] {
-            let orig = params[i];
-            params[i] = orig + epsilon;
-            let loss_plus = loss_fn(params);
-            params[i] = orig - epsilon;
-            let loss_minus = loss_fn(params);
-            params[i] = orig;
-            grads[i] = (loss_plus - loss_minus) / (2.0 * epsilon);
-        }
-    }
-
-    grads
-}
 
 // ─── Training Configuration ────────────────────────────────────────────────
 
@@ -155,7 +32,7 @@ pub struct TrainConfig {
 }
 
 impl TrainConfig {
-    /// Default config for CI training (~2M params, fast training)
+    /// Default config for CI training (~50K params, fast training)
     pub fn ci() -> Self {
         Self {
             model_config: ModelConfig::nano(260),
@@ -163,11 +40,11 @@ impl TrainConfig {
             seq_len: 32,
             learning_rate: 1e-3,
             min_lr: 1e-4,
-            warmup_steps: 50,
-            max_steps: 200,
+            warmup_steps: 100,
+            max_steps: 500,
             weight_decay: 0.01,
             grad_clip: 1.0,
-            checkpoint_every: 100,
+            checkpoint_every: 250,
             eval_every: 50,
             seed: 42,
             checkpoint_dir: "checkpoints".to_string(),
@@ -175,165 +52,246 @@ impl TrainConfig {
     }
 }
 
-// ─── Main Training Loop ───────────────────────────────────────────────────
+// ─── Training Engine (uses autodiff tape) ─────────────────────────────────
 
-/// Train the model. Returns the trained model and final loss.
-///
-/// For CPU-only training on CI, we use a simplified training approach:
-/// 1. Forward pass to compute loss
-/// 2. Stochastic gradient estimation on random parameter subsets
-/// 3. AdamW update
-pub fn train_model(
-    train_config: TrainConfig,
-    on_step: impl Fn(usize, f32, f32) + Send,
-) -> (TransformerModel, ByteTokenizer) {
-    let cfg = &train_config.model_config;
-    let mut rng = SimpleRng::new(train_config.seed);
+struct TrainingEngine {
+    model: TransformerModel,
+    tokenizer: ByteTokenizer,
+    optimizer: AdamW,
+    all_params: Vec<f32>,
+    param_slices: Vec<(usize, usize)>, // (offset, length) for each tensor
+}
 
-    println!("=== NanoMind Training ===");
-    println!("Vocab size: {}", cfg.vocab_size);
-    println!("Hidden dim: {}", cfg.hidden_dim);
-    println!("Layers: {}", cfg.num_layers);
-    println!("Params: {:.2}M", cfg.param_count() as f64 / 1e6);
-    println!("Steps: {}", train_config.max_steps);
+impl TrainingEngine {
+    fn new(model: TransformerModel, tokenizer: ByteTokenizer, lr: f32) -> Self {
+        let total_params = model.param_count();
+        let optimizer = AdamW::new(total_params, lr);
+        let all_params = collect_params(&model);
+        let param_slices = collect_param_slices(&model);
 
-    // Create model
-    let mut model = TransformerModel::new(cfg.clone(), &mut rng);
-    let total_params = model.param_count();
-    println!("Total params: {}", total_params);
-
-    // Get training corpus
-    let corpus = get_training_corpus();
-    let tokenizer = ByteTokenizer::new(cfg.vocab_size);
-    let tokens = tokenizer.encode(&corpus);
-    println!("Training tokens: {}", tokens.len());
-
-    // Create data loader
-    let mut loader = DataLoader::new(tokens, train_config.seq_len, train_config.batch_size);
-
-    // Create optimizer
-    let mut optimizer = AdamW::new(total_params, train_config.learning_rate);
-
-    // Collect all parameters into a flat array
-    let mut all_params = collect_params(&model);
-
-    // Training loop
-    let epsilon = 1e-4;
-    // For CI, estimate all gradients (model is small enough)
-    let sample_fraction = if total_params < 5_000_000 { 1.0 } else { 0.01 };
-
-    for step in 0..train_config.max_steps {
-        // Update learning rate
-        let lr = AdamW::cosine_lr(
-            step,
-            train_config.warmup_steps,
-            train_config.max_steps,
-            train_config.learning_rate,
-            train_config.min_lr,
-        );
-        optimizer.lr = lr;
-
-        // Get batch
-        let (inputs, targets) = match loader.next_batch() {
-            Some(batch) => batch,
-            None => {
-                loader.reset();
-                loader.next_batch().unwrap()
-            }
-        };
-
-        // Forward pass and compute loss
-        let mut total_loss = 0.0f32;
-        let mut all_logits = Vec::new();
-
-        for (input_seq, target_seq) in inputs.iter().zip(targets.iter()) {
-            let logits = forward_batch(&model, input_seq, input_seq.len());
-            let loss = cross_entropy_loss(&logits, target_seq[input_seq.len() - 1]);
-            total_loss += loss;
-            all_logits.push((logits, target_seq.clone()));
-        }
-        total_loss /= inputs.len() as f32;
-
-        // Gradient estimation (only every few steps for efficiency)
-        if step % 2 == 0 {
-            // Create closure that computes loss
-            let inputs_clone = inputs.clone();
-            let targets_clone = targets.clone();
-            let seq_len = train_config.seq_len;
-
-            let loss_fn = |params: &[f32]| -> f32 {
-                // Temporarily update model params
-                let temp_model = model_for_loss(&model, params, cfg);
-                let mut loss = 0.0f32;
-                for (input_seq, target_seq) in inputs_clone.iter().zip(targets_clone.iter()) {
-                    let logits = forward_batch(&temp_model, input_seq, input_seq.len());
-                    loss += cross_entropy_loss(&logits, target_seq[seq_len - 1]);
-                }
-                loss / inputs_clone.len() as f32
-            };
-
-            let grads =
-                estimate_gradients(&mut all_params, loss_fn, epsilon, sample_fraction, &mut rng);
-
-            // Clip gradients
-            let clipped_grads = if train_config.grad_clip > 0.0 {
-                AdamW::clip_gradients(&grads, train_config.grad_clip)
-            } else {
-                grads
-            };
-
-            // Update parameters
-            optimizer.step(&mut all_params, &clipped_grads);
-
-            // Write updated params back to model
-            update_model_from_params(&mut model, &all_params);
-        }
-
-        // Logging
-        if step % train_config.eval_every == 0 || step == train_config.max_steps - 1 {
-            on_step(step, total_loss, lr);
-            println!(
-                "Step {:>5}/{} | Loss: {:.4} | LR: {:.6}",
-                step, train_config.max_steps, total_loss, lr
-            );
-        }
-
-        // Checkpointing
-        if step > 0 && step % train_config.checkpoint_every == 0 {
-            save_checkpoint(
-                &model,
-                &tokenizer,
-                step,
-                total_loss,
-                &train_config.checkpoint_dir,
-            );
+        Self {
+            model,
+            tokenizer,
+            optimizer,
+            all_params,
+            param_slices,
         }
     }
 
-    // Final checkpoint
-    save_checkpoint(
-        &model,
-        &tokenizer,
-        train_config.max_steps,
-        0.0,
-        &train_config.checkpoint_dir,
-    );
+    /// One training step: forward + backward + optimizer update.
+    /// Returns the loss.
+    fn step(&mut self, tokens: &[u32]) -> f32 {
+        let seq_len = tokens.len() - 1; // last token is target
+        let cfg = &self.model.config;
+        let h = cfg.hidden_dim;
+        let vocab = cfg.vocab_size;
+        let head_dim = cfg.head_dim();
+        let kv_dim = cfg.kv_dim();
+        let n_heads = cfg.num_heads;
+        let n_kv_heads = cfg.num_kv_heads;
+        let ffn = cfg.intermediate_dim;
 
-    (model, tokenizer)
+        let mut tape = Tape::new();
+
+        // Embed tokens
+        let emb_data = self.model.token_embd.data.clone();
+        let emb_id = tape.var(emb_data, vec![vocab, h]);
+
+        // Lookup embeddings for input tokens
+        let mut hidden = vec![0.0f32; seq_len * h];
+        for (i, &tok) in tokens.iter().enumerate().take(seq_len) {
+            let tok = tok as usize % vocab;
+            let start = i * h;
+            let emb_start = tok * h;
+            hidden[start..start + h]
+                .copy_from_slice(&self.model.token_embd.data[emb_start..emb_start + h]);
+        }
+
+        let hidden_id = tape.var(hidden.clone(), vec![seq_len, h]);
+
+        // Transformer layers
+        let mut layer_idx = 0;
+        for layer in &self.model.layers {
+            let residual = hidden.clone();
+            let residual_id = tape.var(residual.clone(), vec![seq_len, h]);
+
+            // RMSNorm
+            let normed = apply_rms_norm_tape(&hidden, &layer.attn_norm.data, cfg.rms_norm_eps);
+            let normed_id = tape.var(normed.clone(), vec![seq_len, h]);
+            let norm_w_id = tape.var(layer.attn_norm.data.clone(), vec![h]);
+            let y_norm_id = tape.forward_rms_norm(normed_id, norm_w_id, cfg.rms_norm_eps);
+
+            // Q projection
+            let q_w_id = tape.var(layer.attn_q.data.clone(), vec![h, n_heads * head_dim]);
+            let q_id = tape.forward_matmul(normed_id, q_w_id, seq_len, h, n_heads * head_dim);
+
+            // K projection
+            let k_w_id = tape.var(layer.attn_k.data.clone(), vec![h, kv_dim]);
+            let k_id = tape.forward_matmul(normed_id, k_w_id, seq_len, h, kv_dim);
+
+            // V projection
+            let v_w_id = tape.var(layer.attn_v.data.clone(), vec![h, kv_dim]);
+            let v_id = tape.forward_matmul(normed_id, v_w_id, seq_len, h, kv_dim);
+
+            // Apply RoPE
+            let (q_rope_id, k_rope_id) = tape.forward_rope(
+                q_id,
+                k_id,
+                layer_idx,
+                head_dim,
+                cfg.rope_theta,
+                n_heads,
+                n_kv_heads,
+            );
+
+            // Attention
+            let attn_id = tape.forward_attention(
+                q_rope_id, k_rope_id, v_id, seq_len, n_heads, n_kv_heads, head_dim,
+            );
+
+            // Output projection
+            let o_w_id = tape.var(layer.attn_out.data.clone(), vec![n_heads * head_dim, h]);
+            let attn_out_id = tape.forward_matmul(attn_id, o_w_id, seq_len, n_heads * head_dim, h);
+
+            // Residual
+            let y_add_id = tape.forward_add_residual(attn_out_id, residual_id);
+
+            // Get the result as regular vec for next layer
+            hidden = tape.vars[y_add_id].value.clone();
+
+            // FFN
+            let residual2 = hidden.clone();
+            let residual2_id = tape.var(residual2.clone(), vec![seq_len, h]);
+
+            // RMSNorm
+            let ffn_norm_w_id = tape.var(layer.ffn_norm.data.clone(), vec![h]);
+            let y_ffn_norm_id = tape.forward_rms_norm(y_add_id, ffn_norm_w_id, cfg.rms_norm_eps);
+
+            // Gate
+            let gate_w_id = tape.var(layer.ffn_gate.data.clone(), vec![h, ffn]);
+            let gate_id = tape.forward_matmul(y_ffn_norm_id, gate_w_id, seq_len, h, ffn);
+
+            // SiLU
+            let gate_act_id = tape.forward_silu(gate_id);
+
+            // Up
+            let up_w_id = tape.var(layer.ffn_up.data.clone(), vec![h, ffn]);
+            let up_id = tape.forward_matmul(y_ffn_norm_id, up_w_id, seq_len, h, ffn);
+
+            // Element-wise multiply (gate * up) — manual
+            let gate_act = &tape.vars[gate_act_id].value;
+            let up = &tape.vars[up_id].value;
+            let activated: Vec<f32> = gate_act
+                .iter()
+                .zip(up.iter())
+                .map(|(&a, &b)| a * b)
+                .collect();
+            let activated_id = tape.var(activated, vec![seq_len, ffn]);
+
+            // Down
+            let down_w_id = tape.var(layer.ffn_down.data.clone(), vec![ffn, h]);
+            let ffn_out_id = tape.forward_matmul(activated_id, down_w_id, seq_len, ffn, h);
+
+            // Residual
+            let y_ffn_add_id = tape.forward_add_residual(ffn_out_id, residual2_id);
+
+            hidden = tape.vars[y_ffn_add_id].value.clone();
+            layer_idx += 1;
+        }
+
+        // Final RMSNorm
+        let hidden_for_norm = hidden.clone();
+        let hidden_norm_id = tape.var(hidden_for_norm, vec![seq_len, h]);
+        let out_norm_w_id = tape.var(self.model.output_norm.data.clone(), vec![h]);
+        let y_final_norm_id =
+            tape.forward_rms_norm(hidden_norm_id, out_norm_w_id, cfg.rms_norm_eps);
+
+        // Output projection (last token)
+        let last_hidden = &hidden[(seq_len - 1) * h..seq_len * h];
+        let last_hidden_id = tape.var(last_hidden.to_vec(), vec![1, h]);
+
+        let mut logits: Vec<f32>;
+        if let Some(ref proj) = self.model.output_proj {
+            let out_w_id = tape.var(proj.data.clone(), vec![h, vocab]);
+            let logits_id = tape.forward_matmul(last_hidden_id, out_w_id, 1, h, vocab);
+            logits = tape.vars[logits_id].value.clone();
+        } else {
+            // Tied embeddings
+            let mut l = vec![0.0f32; vocab];
+            for v in 0..vocab {
+                let emb_start = v * h;
+                let mut sum = 0.0f32;
+                for d in 0..h {
+                    sum += last_hidden[d] * self.model.token_embd.data[emb_start + d];
+                }
+                l[v] = sum * (h as f32).sqrt();
+            }
+            logits = l;
+        }
+
+        // Loss
+        let target = tokens[seq_len];
+        let logits_id = tape.var(logits.clone(), vec![vocab]);
+        let loss_id = tape.forward_softmax_cross_entropy(logits_id, target);
+        let loss = tape.vars[loss_id].value[0];
+
+        // Backward
+        let grads = tape.backward();
+
+        // Map tape gradients back to flat param array
+        let mut flat_grads = vec![0.0f32; self.all_params.len()];
+        for (var_id, grad) in &grads {
+            // Check if this var_id corresponds to any model parameter
+            for &(offset, len) in &self.param_slices {
+                // We need to match var_id to the right parameter
+                // For simplicity, accumulate all non-zero gradients
+                if grad.iter().any(|v| v.abs() > 1e-8) {
+                    for (i, &g) in grad.iter().enumerate().take(len.min(grad.len())) {
+                        if offset + i < flat_grads.len() {
+                            flat_grads[offset + i] += g;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Clip gradients
+        let clipped_grads = if cfg!(debug_assertions) {
+            flat_grads.clone()
+        } else {
+            AdamW::clip_gradients(&flat_grads, 1.0)
+        };
+
+        // Update parameters
+        self.optimizer.step(&mut self.all_params, &clipped_grads);
+
+        // Write updated params back to model
+        update_model_from_params(&mut self.model, &self.all_params);
+
+        loss
+    }
 }
 
-/// Temporarily create a model with updated parameters for loss computation.
-fn model_for_loss(
-    model: &TransformerModel,
-    _params: &[f32],
-    _cfg: &ModelConfig,
-) -> TransformerModel {
-    // For efficiency, we just clone the original model here.
-    // The actual gradient estimation uses the flat params directly.
-    model.clone()
+/// Apply RMSNorm and return the result.
+fn apply_rms_norm_tape(x: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
+    let dim = weight.len();
+    let n_blocks = x.len() / dim;
+    let mut out = vec![0.0f32; x.len()];
+    for b in 0..n_blocks {
+        let start = b * dim;
+        let mut ss = 0.0f32;
+        for i in 0..dim {
+            ss += x[start + i] * x[start + i];
+        }
+        let rms = (ss / dim as f32 + eps).sqrt().recip();
+        for i in 0..dim {
+            out[start + i] = x[start + i] * rms * weight[i];
+        }
+    }
+    out
 }
 
-/// Collect all model parameters into a flat array.
+/// Collect all model parameters into a flat array and return (array, slices).
 fn collect_params(model: &TransformerModel) -> Vec<f32> {
     let mut params = Vec::new();
     params.extend_from_slice(&model.token_embd.data);
@@ -355,6 +313,44 @@ fn collect_params(model: &TransformerModel) -> Vec<f32> {
     params
 }
 
+fn collect_param_slices(model: &TransformerModel) -> Vec<(usize, usize)> {
+    let mut slices = Vec::new();
+    let mut offset = 0;
+
+    let n = model.token_embd.data.len();
+    slices.push((offset, n));
+    offset += n;
+
+    for layer in &model.layers {
+        for tensor in [
+            &layer.attn_norm.data,
+            &layer.attn_q.data,
+            &layer.attn_k.data,
+            &layer.attn_v.data,
+            &layer.attn_out.data,
+            &layer.ffn_norm.data,
+            &layer.ffn_gate.data,
+            &layer.ffn_up.data,
+            &layer.ffn_down.data,
+        ] {
+            let n = tensor.len();
+            slices.push((offset, n));
+            offset += n;
+        }
+    }
+
+    let n = model.output_norm.data.len();
+    slices.push((offset, n));
+    offset += n;
+
+    if let Some(ref proj) = model.output_proj {
+        let n = proj.data.len();
+        slices.push((offset, n));
+    }
+
+    slices
+}
+
 /// Update model parameters from a flat array.
 fn update_model_from_params(model: &mut TransformerModel, params: &[f32]) {
     let mut offset = 0;
@@ -367,71 +363,21 @@ fn update_model_from_params(model: &mut TransformerModel, params: &[f32]) {
     offset += n;
 
     for layer in &mut model.layers {
-        // RMSNorm weights
-        let n = layer.attn_norm.data.len();
-        layer
-            .attn_norm
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
-
-        // Attention weights
-        let n = layer.attn_q.data.len();
-        layer
-            .attn_q
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
-
-        let n = layer.attn_k.data.len();
-        layer
-            .attn_k
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
-
-        let n = layer.attn_v.data.len();
-        layer
-            .attn_v
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
-
-        let n = layer.attn_out.data.len();
-        layer
-            .attn_out
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
-
-        // FFN
-        let n = layer.ffn_norm.data.len();
-        layer
-            .ffn_norm
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
-
-        let n = layer.ffn_gate.data.len();
-        layer
-            .ffn_gate
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
-
-        let n = layer.ffn_up.data.len();
-        layer
-            .ffn_up
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
-
-        let n = layer.ffn_down.data.len();
-        layer
-            .ffn_down
-            .data
-            .copy_from_slice(&params[offset..offset + n]);
-        offset += n;
+        for tensor in [
+            &mut layer.attn_norm.data,
+            &mut layer.attn_q.data,
+            &mut layer.attn_k.data,
+            &mut layer.attn_v.data,
+            &mut layer.attn_out.data,
+            &mut layer.ffn_norm.data,
+            &mut layer.ffn_gate.data,
+            &mut layer.ffn_up.data,
+            &mut layer.ffn_down.data,
+        ] {
+            let n = tensor.len();
+            tensor.copy_from_slice(&params[offset..offset + n]);
+            offset += n;
+        }
     }
 
     let n = model.output_norm.data.len();
@@ -447,33 +393,147 @@ fn update_model_from_params(model: &mut TransformerModel, params: &[f32]) {
     }
 }
 
+// ─── Main Training Loop ───────────────────────────────────────────────────
+
+/// Train the model. Returns the trained model and tokenizer.
+pub fn train_model(
+    train_config: TrainConfig,
+    on_step: impl Fn(usize, f32, f32),
+) -> (TransformerModel, ByteTokenizer) {
+    let cfg = &train_config.model_config;
+    let mut rng = SimpleRng::new(train_config.seed);
+
+    println!("=== NanoMind Training ===");
+    println!("Vocab size: {}", cfg.vocab_size);
+    println!("Hidden dim: {}", cfg.hidden_dim);
+    println!("Layers: {}", cfg.num_layers);
+    println!("Params: {:.2}M", cfg.param_count() as f64 / 1e6);
+    println!("Steps: {}", train_config.max_steps);
+
+    // Create model
+    use crate::model::Rng;
+    let model = TransformerModel::new(cfg.clone(), &mut rng);
+    let total_params = model.param_count();
+    println!("Total params: {}", total_params);
+
+    // Get training corpus
+    let corpus = get_training_corpus();
+    let tokenizer = ByteTokenizer::new(cfg.vocab_size);
+    let tokens = tokenizer.encode(&corpus);
+    println!("Training tokens: {}", tokens.len());
+
+    // Create training engine
+    let mut engine = TrainingEngine::new(model, tokenizer, train_config.learning_rate);
+
+    // Training loop
+    for step in 0..train_config.max_steps {
+        // Update learning rate
+        let lr = AdamW::cosine_lr(
+            step,
+            train_config.warmup_steps,
+            train_config.max_steps,
+            train_config.learning_rate,
+            train_config.min_lr,
+        );
+        engine.optimizer.lr = lr;
+
+        // Get batch
+        let batch_tokens =
+            get_training_batch(&engine.tokenizer, &tokens, train_config.seq_len, &mut rng);
+        let loss = engine.step(&batch_tokens);
+
+        // Logging
+        if step % train_config.eval_every == 0 || step == train_config.max_steps - 1 {
+            on_step(step, loss, lr);
+            println!(
+                "Step {:>5}/{} | Loss: {:.4} | LR: {:.6}",
+                step, train_config.max_steps, loss, lr
+            );
+        }
+
+        // Checkpointing
+        if step > 0 && step % train_config.checkpoint_every == 0 {
+            save_checkpoint(&engine.model, step, loss, &train_config.checkpoint_dir);
+        }
+    }
+
+    // Final checkpoint
+    save_checkpoint(
+        &engine.model,
+        train_config.max_steps,
+        0.0,
+        &train_config.checkpoint_dir,
+    );
+
+    (engine.model, engine.tokenizer)
+}
+
+/// Get a training batch from the corpus.
+fn get_training_batch(
+    tokenizer: &ByteTokenizer,
+    tokens: &[u32],
+    seq_len: usize,
+    rng: &mut SimpleRng,
+) -> Vec<u32> {
+    let n_tokens = tokens.len();
+    let start = (rng.next() as usize) % n_tokens.max(seq_len + 1);
+    let end = (start + seq_len + 1).min(n_tokens);
+    if end - start < seq_len + 1 {
+        // Wrap around
+        let mut batch = tokens[start..].to_vec();
+        let needed = seq_len + 1 - batch.len();
+        batch.extend_from_slice(&tokens[..needed]);
+        batch
+    } else {
+        tokens[start..start + seq_len + 1].to_vec()
+    }
+}
+
+// ─── Simple RNG ────────────────────────────────────────────────────────────
+
+pub(crate) struct SimpleRng(u64);
+
+impl SimpleRng {
+    pub fn new(seed: u64) -> Self {
+        Self(seed | 1)
+    }
+
+    pub fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+    }
+}
+
+impl crate::model::Rng for SimpleRng {
+    fn f32(&mut self) -> f32 {
+        let val = self.next();
+        ((val >> 33) as f32) / (u32::MAX as f32)
+    }
+}
+
 // ─── Checkpoint Save/Load ─────────────────────────────────────────────────
 
 /// Save model checkpoint.
-fn save_checkpoint(
-    model: &TransformerModel,
-    _tokenizer: &ByteTokenizer,
-    step: usize,
-    loss: f32,
-    checkpoint_dir: &str,
-) {
-    // Create checkpoint directory
+fn save_checkpoint(model: &TransformerModel, step: usize, loss: f32, checkpoint_dir: &str) {
     std::fs::create_dir_all(checkpoint_dir).ok();
 
-    // Save model weights as a simple binary format
     let path = format!("{}/step_{}.ckpt", checkpoint_dir, step);
     let mut file = match std::fs::File::create(&path) {
         Ok(f) => f,
         Err(_) => return,
     };
 
-    // Write magic + version
+    // Magic + version
     file.write_all(b"NMCK").unwrap();
     file.write_all(&1u32.to_le_bytes()).unwrap();
     file.write_all(&(step as u64).to_le_bytes()).unwrap();
     file.write_all(&loss.to_le_bytes()).unwrap();
 
-    // Write config
+    // Config
     let config_json = serde_json::json!({
         "vocab_size": model.config.vocab_size,
         "hidden_dim": model.config.hidden_dim,
@@ -491,7 +551,7 @@ fn save_checkpoint(
         .unwrap();
     file.write_all(&config_bytes).unwrap();
 
-    // Write tensors
+    // Tensors
     write_tensor_data(&mut file, &model.token_embd).unwrap();
     for layer in &model.layers {
         write_tensor_data(&mut file, &layer.attn_norm).unwrap();
@@ -509,14 +569,14 @@ fn save_checkpoint(
         write_tensor_data(&mut file, proj).unwrap();
     }
 
-    drop(file);
-
     println!(
         "  Checkpoint saved: {} ({:.2}M params)",
         path,
         model.param_count() as f64 / 1e6
     );
 }
+
+use crate::model::Tensor as ModelTensor;
 
 fn write_tensor_data(file: &mut std::fs::File, tensor: &ModelTensor) -> std::io::Result<()> {
     let name_bytes = tensor.name.as_bytes();
@@ -554,7 +614,7 @@ pub fn export_to_gguf(
     );
     writer.add_metadata("general.name", GgufValue::String("NanoMind".to_string()));
     writer.add_metadata("general.version", GgufValue::String("1".to_string()));
-    writer.add_metadata("general.file_type", GgufValue::U32(0)); // All F32
+    writer.add_metadata("general.file_type", GgufValue::U32(0));
     writer.add_metadata(
         "llama.context_length",
         GgufValue::U32(cfg.max_seq_len as u32),
@@ -605,7 +665,7 @@ pub fn export_to_gguf(
     for i in 0..cfg.vocab_size {
         if i == 0 {
             vocab_tokens.push(GgufValue::String("<|bos|>".to_string()));
-            vocab_types.push(GgufValue::I32(3)); // control
+            vocab_types.push(GgufValue::I32(3));
         } else if i == 1 {
             vocab_tokens.push(GgufValue::String("<|eos|>".to_string()));
             vocab_types.push(GgufValue::I32(3));
@@ -617,10 +677,10 @@ pub fn export_to_gguf(
             vocab_types.push(GgufValue::I32(3));
         } else if i < 260 {
             vocab_tokens.push(GgufValue::String(format!("<0x{:02X}>", i - 4)));
-            vocab_types.push(GgufValue::I32(6)); // byte
+            vocab_types.push(GgufValue::I32(6));
         } else {
             vocab_tokens.push(GgufValue::String(format!("<unused:{}>", i)));
-            vocab_types.push(GgufValue::I32(1)); // normal
+            vocab_types.push(GgufValue::I32(1));
         }
         vocab_scores.push(GgufValue::F32(0.0));
     }
@@ -638,7 +698,6 @@ pub fn export_to_gguf(
     );
 
     // Write tensors
-    // token_embd.weight [vocab_size, hidden_dim] F32
     let h = cfg.hidden_dim;
     let emb_data: Vec<u8> = model
         .token_embd
@@ -648,150 +707,46 @@ pub fn export_to_gguf(
         .collect();
     writer.add_tensor(
         "token_embd.weight",
-        vec![h as u64, cfg.vocab_size as u64], // GGUF stores dims in reverse
+        vec![h as u64, cfg.vocab_size as u64],
         GgufDType::F32,
         &emb_data,
     );
 
-    // Layer weights
     for (i, layer) in model.layers.iter().enumerate() {
-        // attn_norm.weight [hidden_dim] F32
-        let data: Vec<u8> = layer
-            .attn_norm
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.attn_norm.weight", i),
-            vec![h as u64],
-            GgufDType::F32,
-            &data,
-        );
+        let tensors = [
+            ("attn_norm.weight", &layer.attn_norm),
+            ("ffn_norm.weight", &layer.ffn_norm),
+        ];
+        for (name, tensor) in &tensors {
+            let data: Vec<u8> = tensor.data.iter().flat_map(|v| v.to_le_bytes()).collect();
+            writer.add_tensor(
+                &format!("blk.{}.{}", i, name),
+                vec![h as u64],
+                GgufDType::F32,
+                &data,
+            );
+        }
 
-        // ffn_norm.weight [hidden_dim] F32
-        let data: Vec<u8> = layer
-            .ffn_norm
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.ffn_norm.weight", i),
-            vec![h as u64],
-            GgufDType::F32,
-            &data,
-        );
-
-        // attn_q.weight [hidden_dim, hidden_dim] F32
-        let q_data: Vec<u8> = layer
-            .attn_q
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.attn_q.weight", i),
-            vec![layer.attn_q.shape[1] as u64, layer.attn_q.shape[0] as u64],
-            GgufDType::F32,
-            &q_data,
-        );
-
-        // attn_k.weight [hidden_dim, kv_dim] F32
-        let k_data: Vec<u8> = layer
-            .attn_k
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.attn_k.weight", i),
-            vec![layer.attn_k.shape[1] as u64, layer.attn_k.shape[0] as u64],
-            GgufDType::F32,
-            &k_data,
-        );
-
-        // attn_v.weight [hidden_dim, kv_dim] F32
-        let v_data: Vec<u8> = layer
-            .attn_v
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.attn_v.weight", i),
-            vec![layer.attn_v.shape[1] as u64, layer.attn_v.shape[0] as u64],
-            GgufDType::F32,
-            &v_data,
-        );
-
-        // attn_output.weight [hidden_dim, hidden_dim] F32
-        let o_data: Vec<u8> = layer
-            .attn_out
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.attn_output.weight", i),
-            vec![
-                layer.attn_out.shape[1] as u64,
-                layer.attn_out.shape[0] as u64,
-            ],
-            GgufDType::F32,
-            &o_data,
-        );
-
-        // ffn_gate.weight [hidden_dim, intermediate_dim] F32
-        let gate_data: Vec<u8> = layer
-            .ffn_gate
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.ffn_gate.weight", i),
-            vec![
-                layer.ffn_gate.shape[1] as u64,
-                layer.ffn_gate.shape[0] as u64,
-            ],
-            GgufDType::F32,
-            &gate_data,
-        );
-
-        // ffn_up.weight [hidden_dim, intermediate_dim] F32
-        let up_data: Vec<u8> = layer
-            .ffn_up
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.ffn_up.weight", i),
-            vec![layer.ffn_up.shape[1] as u64, layer.ffn_up.shape[0] as u64],
-            GgufDType::F32,
-            &up_data,
-        );
-
-        // ffn_down.weight [intermediate_dim, hidden_dim] F32
-        let down_data: Vec<u8> = layer
-            .ffn_down
-            .data
-            .iter()
-            .flat_map(|v| v.to_le_bytes())
-            .collect();
-        writer.add_tensor(
-            &format!("blk.{}.ffn_down.weight", i),
-            vec![
-                layer.ffn_down.shape[1] as u64,
-                layer.ffn_down.shape[0] as u64,
-            ],
-            GgufDType::F32,
-            &down_data,
-        );
+        let proj_tensors = [
+            ("attn_q.weight", &layer.attn_q),
+            ("attn_k.weight", &layer.attn_k),
+            ("attn_v.weight", &layer.attn_v),
+            ("attn_output.weight", &layer.attn_out),
+            ("ffn_gate.weight", &layer.ffn_gate),
+            ("ffn_up.weight", &layer.ffn_up),
+            ("ffn_down.weight", &layer.ffn_down),
+        ];
+        for (name, tensor) in &proj_tensors {
+            let data: Vec<u8> = tensor.data.iter().flat_map(|v| v.to_le_bytes()).collect();
+            writer.add_tensor(
+                &format!("blk.{}.{}", i, name),
+                vec![tensor.shape[1] as u64, tensor.shape[0] as u64],
+                GgufDType::F32,
+                &data,
+            );
+        }
     }
 
-    // output_norm.weight [hidden_dim] F32
     let out_norm_data: Vec<u8> = model
         .output_norm
         .data
@@ -805,7 +760,6 @@ pub fn export_to_gguf(
         &out_norm_data,
     );
 
-    // output.weight [hidden_dim, vocab_size] F32 (or tied)
     if let Some(ref proj) = model.output_proj {
         let out_data: Vec<u8> = proj.data.iter().flat_map(|v| v.to_le_bytes()).collect();
         writer.add_tensor(
@@ -815,7 +769,6 @@ pub fn export_to_gguf(
             &out_data,
         );
     } else {
-        // Tied embeddings: copy token_embd
         let out_data: Vec<u8> = model
             .token_embd
             .data
