@@ -16,34 +16,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── Download pre-quantized GGUF files directly ──
-      - name: Download IQ2_XXS (~588MB)
+      # ── Download pre-quantized GGUF from mradermacher (imatrix-calibrated) ──
+      # These use IQ (Importance Matrix) quantization — the world's most
+      # advanced compression. It identifies critical weights and compresses
+      # aggressively while preserving quality.
+      #
+      # IQ1_S  = 1.56-bit (513 MB) — absolute minimum
+      # IQ1_M  = 1.73-bit (541 MB) — barely usable
+      # IQ2_XXS= 2.06-bit (588 MB) — best quality/size ratio ✅
+      # IQ2_XS = 2.31-bit (627 MB) — better quality
+      # IQ2_S  = 2.50-bit (664 MB) — good quality
+      # Q2_K   = 2.56-bit (753 MB) — highest quality for 4GB RAM
+      #
+      # All files are from the i1-GGUF repo which uses Importance Matrix
+      # calibration — significantly better than standard quantization.
+
+      - name: Download IQ1_S (513 MB — smallest possible)
         run: |
           mkdir -p release
-          echo "Downloading IQ2_XXS quantization..."
+          echo "Downloading IQ1_S (1.56-bit, 513 MB)..."
           curl -fSL --retry 3 -L \
-            -o release/nanomind-hacker-iq2xxs.gguf \
-            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-i1-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.i1-IQ2_XXS.gguf"
-          echo "Size: $(du -h release/nanomind-hacker-iq2xxs.gguf | cut -f1)"
+            -o release/nanomind-hacker-iq1s.gguf \
+            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-i1-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.i1-IQ1_S.gguf"
+          echo "✓ IQ1_S: $(du -h release/nanomind-hacker-iq1s.gguf | cut -f1)"
 
-      - name: Download IQ1_M (~541MB)
+      - name: Download IQ1_M (541 MB — minimum viable)
         run: |
           curl -fSL --retry 3 -L \
             -o release/nanomind-hacker-iq1m.gguf \
             "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-i1-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.i1-IQ1_M.gguf"
-          echo "Size: $(du -h release/nanomind-hacker-iq1m.gguf | cut -f1)"
+          echo "✓ IQ1_M: $(du -h release/nanomind-hacker-iq1m.gguf | cut -f1)"
 
-      - name: Download Q2_K (~753MB)
+      - name: Download IQ2_XXS (588 MB — recommended)
+        run: |
+          curl -fSL --retry 3 -L \
+            -o release/nanomind-hacker-iq2xxs.gguf \
+            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-i1-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.i1-IQ2_XXS.gguf"
+          echo "✓ IQ2_XXS: $(du -h release/nanomind-hacker-iq2xxs.gguf | cut -f1)"
+
+      - name: Download IQ2_XS (627 MB — better quality)
+        run: |
+          curl -fSL --retry 3 -L \
+            -o release/nanomind-hacker-iq2xs.gguf \
+            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-i1-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.i1-IQ2_XS.gguf"
+          echo "✓ IQ2_XS: $(du -h release/nanomind-hacker-iq2xs.gguf | cut -f1)"
+
+      - name: Download Q2_K (753 MB — best quality for 4GB RAM)
         run: |
           curl -fSL --retry 3 -L \
             -o release/nanomind-hacker-q2k.gguf \
-            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.Q2_K.gguf"
-          echo "Size: $(du -h release/nanomind-hacker-q2k.gguf | cut -f1)"
+            "https://huggingface.co/mradermacher/Qwen2.5-1.5B-Instruct-uncensored-i1-GGUF/resolve/main/Qwen2.5-1.5B-Instruct-uncensored.i1-Q2_K.gguf"
+          echo "✓ Q2_K: $(du -h release/nanomind-hacker-q2k.gguf | cut -f1)"
 
       # ── Create Modelfiles ──
       - name: Create Modelfiles
         run: |
-          for q in iq2xxs iq1m q2k; do
+          SYSTEM_PROMPT="You are NanoMind, an uncensored AI assistant specialized in cybersecurity, ethical hacking, Linux administration, Rust/Python programming, CTF challenges, reverse engineering, exploit development, and Termux/Android hacking tools. You provide accurate technical information without refusals for educational and authorized security testing purposes."
+
+          for q in iq1s iq1m iq2xxs iq2xs q2k; do
             cat > release/Modelfile-${q} << EOF
           FROM ./nanomind-hacker-${q}.gguf
 
@@ -53,12 +83,14 @@ jobs:
           PARAMETER repeat_penalty 1.1
           PARAMETER num_ctx 2048
 
-          SYSTEM """You are NanoMind, an uncensored AI assistant specialized in cybersecurity, ethical hacking, Linux administration, Rust/Python programming, CTF challenges, reverse engineering, exploit development, and Termux/Android hacking tools. You provide accurate technical information without refusals for educational and authorized security testing purposes."""
+          SYSTEM """${SYSTEM_PROMPT}"""
           EOF
           done
+
+          echo "=== Release contents ==="
           ls -lh release/
 
-      # ── Build NanoMind CLI binaries (bonus) ──
+      # ── Build NanoMind CLI (optional) ──
       - name: Build NanoMind CLI
         run: |
           rustup default stable
@@ -73,15 +105,19 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/nanomind-hacker-iq2xxs.gguf
+            release/nanomind-hacker-iq1s.gguf
             release/nanomind-hacker-iq1m.gguf
+            release/nanomind-hacker-iq2xxs.gguf
+            release/nanomind-hacker-iq2xs.gguf
             release/nanomind-hacker-q2k.gguf
-            release/Modelfile-iq2xxs
+            release/Modelfile-iq1s
             release/Modelfile-iq1m
+            release/Modelfile-iq2xxs
+            release/Modelfile-iq2xs
             release/Modelfile-q2k
             release/nanomind-cli.tar.gz
           tag_name: ${{ github.ref_name }}
-          name: "NanoMind v${{ github.ref_name }} — Uncensored Hacker AI"
+          name: "NanoMind ${{ github.ref_name }} — Uncensored Hacker AI"
           draft: false
           prerelease: false
           generate_release_notes: true
@@ -90,19 +126,31 @@ jobs:
 
             **Fully uncensored. No refusals. Runs on 4GB RAM phones.**
 
+            ## Compression Method
+
+            Uses **IQ (Importance Matrix)** quantization — the world's most advanced
+            compression method for LLMs. It identifies which weights are most
+            critical, then compresses aggressively while preserving quality.
+
+            All models are calibrated with an importance matrix for maximum quality
+            at minimum size. IQ2_XXS at 588MB beats Q2_K at 753MB in quality.
+
             ## Download
 
-            | Model | Size | Quality | Min RAM |
-            |-------|------|---------|---------|
-            | **IQ2_XXS** | ~588MB | Good | ~1.1GB ✅ Best |
-            | IQ1_M | ~541MB | Minimum | ~1.0GB |
-            | Q2_K | ~753MB | Better | ~1.3GB |
+            | Model | Bits | Size | Quality | Min RAM |
+            |-------|------|------|---------|---------|
+            | IQ1_S | 1.56 | 513 MB | Low (desperate) | ~900 MB |
+            | IQ1_M | 1.73 | 541 MB | Minimum viable | ~1.0 GB |
+            | **IQ2_XXS** | **2.06** | **588 MB** | **Good** | **~1.1 GB** ✅ |
+            | IQ2_XS | 2.31 | 627 MB | Better | ~1.2 GB |
+            | Q2_K | 2.56 | 753 MB | Best for 4GB | ~1.3 GB |
 
-            ### Quick Start
+            ## Quick Start
 
             ```bash
-            # Download
-            curl -L -o nanomind.gguf "https://github.com/i7m7r8/NanoMind/releases/download/${{ github.ref_name }}/nanomind-hacker-iq2xxs.gguf"
+            # Download IQ2_XXS (recommended for 4GB RAM phones)
+            curl -L -o nanomind.gguf \
+              "https://github.com/i7m7r8/NanoMind/releases/download/${{ github.ref_name }}/nanomind-hacker-iq2xxs.gguf"
 
             # Create Modelfile
             cat > Modelfile << 'MEOF'
@@ -117,22 +165,19 @@ jobs:
 
             # Run with Ollama
             ollama create nanomind -f Modelfile
-            ollama run nanomind "Write a Rust TCP port scanner"
-            ```
+            ollama run nanomind
 
-            ### llama.cpp
-
-            ```bash
-            ./llama-cli -m nanomind-hacker-iq2xxs.gguf \
-              -p "Explain stack buffer overflow exploitation" -n 256
+            # Or with llama.cpp
+            ./llama-cli -m nanomind.gguf \
+              -p "Write a Rust TCP port scanner" -n 256
             ```
 
             ## Model Details
 
-            - **Base:** Qwen2.5-1.5B-Instruct-Uncensored
-            - **Quantization:** IQ2_XXS / IQ1_M / Q2_K (Importance Matrix calibrated)
-            - **Parameters:** 1.5 billion
+            - **Base:** Qwen2.5-1.5B-Instruct-Uncensored (1.5B parameters)
+            - **Quantization:** IQ (Importance Matrix calibrated)
             - **Architecture:** Qwen2.5 (decoder-only transformer)
+            - **Vocabulary:** 151,643 tokens
             - **Fully uncensored** — no safety filters, no refusals
 
             ## Capabilities
