@@ -51,6 +51,7 @@ impl DataLoader {
     /// Get the next training batch.
     /// Returns (input_sequences, target_sequences), each [batch_size, seq_len].
     /// Targets are inputs shifted left by 1 (next token prediction).
+    #[allow(clippy::type_complexity)]
     pub fn next_batch(&mut self) -> Option<(Vec<Vec<u32>>, Vec<Vec<u32>>)> {
         let total_needed = self.batch_size * (self.seq_len + 1);
         if self.pos + total_needed > self.tokens.len() {

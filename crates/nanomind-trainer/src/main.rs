@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use nanomind_trainer::config::ModelConfig;
-use nanomind_trainer::train::{TrainConfig, train_model, export_to_gguf};
+use nanomind_trainer::train::{export_to_gguf, train_model, TrainConfig};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -69,18 +69,54 @@ fn cmd_train(args: &[String]) {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--steps" => { i += 1; steps = args[i].parse().expect("Invalid steps"); }
-            "--lr" => { i += 1; lr = args[i].parse().expect("Invalid learning rate"); }
-            "--seq-len" => { i += 1; seq_len = args[i].parse().expect("Invalid seq-len"); }
-            "--vocab" => { i += 1; vocab = args[i].parse().expect("Invalid vocab size"); }
-            "--hidden" => { i += 1; hidden = args[i].parse().expect("Invalid hidden dim"); }
-            "--layers" => { i += 1; layers = args[i].parse().expect("Invalid layers"); }
-            "--heads" => { i += 1; heads = args[i].parse().expect("Invalid heads"); }
-            "--kv-heads" => { i += 1; kv_heads = Some(args[i].parse().expect("Invalid kv-heads")); }
-            "--ffn" => { i += 1; ffn = Some(args[i].parse().expect("Invalid ffn")); }
-            "--corpus" => { i += 1; corpus_path = Some(args[i].clone()); }
-            "--out" => { i += 1; out_path = PathBuf::from(&args[i]); }
-            "--seed" => { i += 1; seed = args[i].parse().expect("Invalid seed"); }
+            "--steps" => {
+                i += 1;
+                steps = args[i].parse().expect("Invalid steps");
+            }
+            "--lr" => {
+                i += 1;
+                lr = args[i].parse().expect("Invalid learning rate");
+            }
+            "--seq-len" => {
+                i += 1;
+                seq_len = args[i].parse().expect("Invalid seq-len");
+            }
+            "--vocab" => {
+                i += 1;
+                vocab = args[i].parse().expect("Invalid vocab size");
+            }
+            "--hidden" => {
+                i += 1;
+                hidden = args[i].parse().expect("Invalid hidden dim");
+            }
+            "--layers" => {
+                i += 1;
+                layers = args[i].parse().expect("Invalid layers");
+            }
+            "--heads" => {
+                i += 1;
+                heads = args[i].parse().expect("Invalid heads");
+            }
+            "--kv-heads" => {
+                i += 1;
+                kv_heads = Some(args[i].parse().expect("Invalid kv-heads"));
+            }
+            "--ffn" => {
+                i += 1;
+                ffn = Some(args[i].parse().expect("Invalid ffn"));
+            }
+            "--corpus" => {
+                i += 1;
+                corpus_path = Some(args[i].clone());
+            }
+            "--out" => {
+                i += 1;
+                out_path = PathBuf::from(&args[i]);
+            }
+            "--seed" => {
+                i += 1;
+                seed = args[i].parse().expect("Invalid seed");
+            }
             _ => {
                 eprintln!("Unknown option: {}", args[i]);
                 std::process::exit(1);
@@ -138,7 +174,10 @@ fn cmd_train(args: &[String]) {
         corpus_path,
     };
 
-    println!("Model params: {:.2}M", train_config.model_config.param_count() as f64 / 1e6);
+    println!(
+        "Model params: {:.2}M",
+        train_config.model_config.param_count() as f64 / 1e6
+    );
     println!();
 
     let start = Instant::now();

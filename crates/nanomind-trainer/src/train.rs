@@ -8,10 +8,10 @@ use crate::data_loader::{get_training_corpus, ByteTokenizer};
 use crate::model::TransformerModel;
 use crate::optimizer::AdamW;
 
+use nanomind_core::gguf_writer::*;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
-use nanomind_core::gguf_writer::*;
 
 // ─── Training Configuration ────────────────────────────────────────────────
 
@@ -58,8 +58,8 @@ impl TrainConfig {
 // ─── Training Engine with proper gradient tracking ─────────────────────────
 
 struct ParamInfo {
-    offset: usize,       // offset in flat param array
-    len: usize,          // length of this parameter
+    offset: usize, // offset in flat param array
+    len: usize,    // length of this parameter
 }
 
 struct TrainingEngine {
@@ -103,13 +103,14 @@ impl TrainingEngine {
         let mut next_param_idx = 0;
 
         // Helper to register a parameter tensor with the gradient tracker
-        let mut reg_param = |data: Vec<f32>, shape: Vec<usize>, tape: &mut Tape, next: &mut usize| -> usize {
-            let pid = *next;
-            let vid = tape.var(data, shape);
-            var_to_param_idx.insert(vid, pid);
-            *next += 1;
-            vid
-        };
+        let mut reg_param =
+            |data: Vec<f32>, shape: Vec<usize>, tape: &mut Tape, next: &mut usize| -> usize {
+                let pid = *next;
+                let vid = tape.var(data, shape);
+                var_to_param_idx.insert(vid, pid);
+                *next += 1;
+                vid
+            };
 
         // ── Embedding ──
         let emb_id = reg_param(
@@ -173,9 +174,8 @@ impl TrainingEngine {
             let v_id = tape.forward_matmul(normed_id, v_w_id, seq_len, h, kv_dim);
 
             // ── RoPE ──
-            let (q_rope_id, k_rope_id) = tape.forward_rope(
-                q_id, k_id, 0, head_dim, cfg.rope_theta, n_heads, n_kv_heads,
-            );
+            let (q_rope_id, k_rope_id) =
+                tape.forward_rope(q_id, k_id, 0, head_dim, cfg.rope_theta, n_heads, n_kv_heads);
 
             // ── Attention ──
             let attn_id = tape.forward_attention(
@@ -232,7 +232,11 @@ impl TrainingEngine {
             // Element-wise multiply (gate * up)
             let gate_act = &tape.vars[gate_act_id].value;
             let up = &tape.vars[up_id].value;
-            let activated: Vec<f32> = gate_act.iter().zip(up.iter()).map(|(&a, &b)| a * b).collect();
+            let activated: Vec<f32> = gate_act
+                .iter()
+                .zip(up.iter())
+                .map(|(&a, &b)| a * b)
+                .collect();
             let activated_id = tape.var(activated, vec![seq_len, ffn]);
 
             // Down projection
@@ -260,7 +264,8 @@ impl TrainingEngine {
             &mut tape,
             &mut next_param_idx,
         );
-        let y_final_norm_id = tape.forward_rms_norm(hidden_norm_id, out_norm_w_id, cfg.rms_norm_eps);
+        let y_final_norm_id =
+            tape.forward_rms_norm(hidden_norm_id, out_norm_w_id, cfg.rms_norm_eps);
 
         // ── Output projection (last token) ──
         let last_hidden = &layer_hidden[(seq_len - 1) * h..seq_len * h];
@@ -335,13 +340,14 @@ fn collect_params_with_info(model: &TransformerModel) -> (Vec<f32>, Vec<ParamInf
     let mut info = Vec::new();
     let mut offset = 0;
 
-    let add_param = |params: &mut Vec<f32>, info: &mut Vec<ParamInfo>, offset: &mut usize, data: &[f32]| {
-        let start = *offset;
-        let len = data.len();
-        params.extend_from_slice(data);
-        *offset += len;
-        info.push(ParamInfo { offset: start, len });
-    };
+    let add_param =
+        |params: &mut Vec<f32>, info: &mut Vec<ParamInfo>, offset: &mut usize, data: &[f32]| {
+            let start = *offset;
+            let len = data.len();
+            params.extend_from_slice(data);
+            *offset += len;
+            info.push(ParamInfo { offset: start, len });
+        };
 
     add_param(&mut params, &mut info, &mut offset, &model.token_embd.data);
 
@@ -370,7 +376,10 @@ fn update_model_from_params(model: &mut TransformerModel, params: &[f32]) {
     let mut offset = 0;
 
     let n = model.token_embd.data.len();
-    model.token_embd.data.copy_from_slice(&params[offset..offset + n]);
+    model
+        .token_embd
+        .data
+        .copy_from_slice(&params[offset..offset + n]);
     offset += n;
 
     for layer in &mut model.layers {
@@ -392,7 +401,10 @@ fn update_model_from_params(model: &mut TransformerModel, params: &[f32]) {
     }
 
     let n = model.output_norm.data.len();
-    model.output_norm.data.copy_from_slice(&params[offset..offset + n]);
+    model
+        .output_norm
+        .data
+        .copy_from_slice(&params[offset..offset + n]);
     offset += n;
 
     if let Some(ref mut proj) = model.output_proj {
@@ -507,17 +519,18 @@ pub fn train_model(
     }
 
     // Final checkpoint
-    save_checkpoint(&engine.model, train_config.max_steps, 0.0, &train_config.checkpoint_dir);
+    save_checkpoint(
+        &engine.model,
+        train_config.max_steps,
+        0.0,
+        &train_config.checkpoint_dir,
+    );
 
     (engine.model, engine.tokenizer)
 }
 
 /// Get a training batch from the corpus.
-fn get_training_batch(
-    tokens: &[u32],
-    seq_len: usize,
-    rng: &mut SimpleRng,
-) -> Vec<u32> {
+fn get_training_batch(tokens: &[u32], seq_len: usize, rng: &mut SimpleRng) -> Vec<u32> {
     let n_tokens = tokens.len();
     let start = (rng.next() as usize) % n_tokens.max(seq_len + 1);
     let end = (start + seq_len + 1).min(n_tokens);
@@ -533,12 +546,7 @@ fn get_training_batch(
 
 // ─── Checkpoint Save/Load ─────────────────────────────────────────────────
 
-fn save_checkpoint(
-    model: &TransformerModel,
-    step: usize,
-    loss: f32,
-    checkpoint_dir: &str,
-) {
+fn save_checkpoint(model: &TransformerModel, step: usize, loss: f32, checkpoint_dir: &str) {
     std::fs::create_dir_all(checkpoint_dir).ok();
 
     let path = format!("{}/step_{}.ckpt", checkpoint_dir, step);
@@ -565,7 +573,8 @@ fn save_checkpoint(
         "tie_embeddings": model.config.tie_embeddings,
     });
     let config_bytes = config_json.to_string().into_bytes();
-    file.write_all(&(config_bytes.len() as u32).to_le_bytes()).unwrap();
+    file.write_all(&(config_bytes.len() as u32).to_le_bytes())
+        .unwrap();
     file.write_all(&config_bytes).unwrap();
 
     write_tensor_data(&mut file, &model.token_embd).unwrap();
@@ -585,7 +594,11 @@ fn save_checkpoint(
         write_tensor_data(&mut file, proj).unwrap();
     }
 
-    println!("  Checkpoint saved: {} ({:.2}M params)", path, model.param_count() as f64 / 1e6);
+    println!(
+        "  Checkpoint saved: {} ({:.2}M params)",
+        path,
+        model.param_count() as f64 / 1e6
+    );
 }
 
 use crate::model::Tensor as ModelTensor;
@@ -619,23 +632,53 @@ pub fn export_to_gguf(
     println!("Output: {:?}", output_path);
 
     // Required metadata for Ollama
-    writer.add_metadata("general.architecture", GgufValue::String("llama".to_string()));
+    writer.add_metadata(
+        "general.architecture",
+        GgufValue::String("llama".to_string()),
+    );
     writer.add_metadata("general.name", GgufValue::String("NanoMind".to_string()));
     writer.add_metadata("general.version", GgufValue::String("1".to_string()));
     writer.add_metadata("general.file_type", GgufValue::U32(0));
-    writer.add_metadata("llama.context_length", GgufValue::U32(cfg.max_seq_len as u32));
-    writer.add_metadata("llama.embedding_length", GgufValue::U32(cfg.hidden_dim as u32));
+    writer.add_metadata(
+        "llama.context_length",
+        GgufValue::U32(cfg.max_seq_len as u32),
+    );
+    writer.add_metadata(
+        "llama.embedding_length",
+        GgufValue::U32(cfg.hidden_dim as u32),
+    );
     writer.add_metadata("llama.block_count", GgufValue::U32(cfg.num_layers as u32));
-    writer.add_metadata("llama.feed_forward_length", GgufValue::U32(cfg.intermediate_dim as u32));
-    writer.add_metadata("llama.attention.head_count", GgufValue::U32(cfg.num_heads as u32));
-    writer.add_metadata("llama.attention.head_count_kv", GgufValue::U32(cfg.num_kv_heads as u32));
-    writer.add_metadata("llama.attention.layer_norm_rms_epsilon", GgufValue::F32(cfg.rms_norm_eps));
+    writer.add_metadata(
+        "llama.feed_forward_length",
+        GgufValue::U32(cfg.intermediate_dim as u32),
+    );
+    writer.add_metadata(
+        "llama.attention.head_count",
+        GgufValue::U32(cfg.num_heads as u32),
+    );
+    writer.add_metadata(
+        "llama.attention.head_count_kv",
+        GgufValue::U32(cfg.num_kv_heads as u32),
+    );
+    writer.add_metadata(
+        "llama.attention.layer_norm_rms_epsilon",
+        GgufValue::F32(cfg.rms_norm_eps),
+    );
     writer.add_metadata("llama.rope.freq_base", GgufValue::F32(cfg.rope_theta));
 
     // Tokenizer metadata
-    writer.add_metadata("tokenizer.ggml.model", GgufValue::String("llama".to_string()));
-    writer.add_metadata("tokenizer.ggml.bos_token_id", GgufValue::U32(tokenizer.bos_id()));
-    writer.add_metadata("tokenizer.ggml.eos_token_id", GgufValue::U32(tokenizer.eos_id()));
+    writer.add_metadata(
+        "tokenizer.ggml.model",
+        GgufValue::String("llama".to_string()),
+    );
+    writer.add_metadata(
+        "tokenizer.ggml.bos_token_id",
+        GgufValue::U32(tokenizer.bos_id()),
+    );
+    writer.add_metadata(
+        "tokenizer.ggml.eos_token_id",
+        GgufValue::U32(tokenizer.eos_id()),
+    );
     writer.add_metadata("tokenizer.ggml.padding_token_id", GgufValue::U32(2));
 
     // Build vocabulary
@@ -680,7 +723,12 @@ pub fn export_to_gguf(
 
     // Write tensors
     let h = cfg.hidden_dim;
-    let emb_data: Vec<u8> = model.token_embd.data.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let emb_data: Vec<u8> = model
+        .token_embd
+        .data
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     writer.add_tensor(
         "token_embd.weight",
         vec![h as u64, cfg.vocab_size as u64],
@@ -723,7 +771,12 @@ pub fn export_to_gguf(
         }
     }
 
-    let out_norm_data: Vec<u8> = model.output_norm.data.iter().flat_map(|v| v.to_le_bytes()).collect();
+    let out_norm_data: Vec<u8> = model
+        .output_norm
+        .data
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
     writer.add_tensor(
         "output_norm.weight",
         vec![h as u64],
@@ -740,7 +793,12 @@ pub fn export_to_gguf(
             &out_data,
         );
     } else {
-        let out_data: Vec<u8> = model.token_embd.data.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let out_data: Vec<u8> = model
+            .token_embd
+            .data
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
         writer.add_tensor(
             "output.weight",
             vec![h as u64, cfg.vocab_size as u64],
@@ -753,7 +811,11 @@ pub fn export_to_gguf(
     writer.write_to_file(output_path)?;
 
     let file_size = output_path.metadata()?.len();
-    println!("GGUF file written: {:?} ({:.2} MB)", output_path, file_size as f64 / 1e6);
+    println!(
+        "GGUF file written: {:?} ({:.2} MB)",
+        output_path,
+        file_size as f64 / 1e6
+    );
 
     Ok(())
 }
