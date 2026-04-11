@@ -1,116 +1,127 @@
-name: Train (Manual)
+name: Train NanoMind
 
 on:
   workflow_dispatch:
     inputs:
+      model_size:
+        description: 'Size: ci(fast test 1M) | nano(135M) | mini(360M)'
+        required: true
+        default: 'ci'
       steps:
-        description: 'Training steps (more = better quality, longer time)'
+        description: 'Training steps (ci=500, nano=50000, mini=100000)'
         required: true
-        default: '1000'
+        default: '500'
       lr:
-        description: 'Learning rate'
+        description: 'Peak learning rate'
         required: true
-        default: '0.001'
+        default: '0.0003'
+      data_mode:
+        description: 'Data: builtin | security'
+        required: true
+        default: 'security'
 
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 350
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "train"
+          shared-key: "nanomind-train"
 
-      - name: Download training data
+      - name: Set model hyperparameters
+        id: hparams
         run: |
-          # Use a simple public domain text corpus for training
-          # Project Gutenberg: Alice in Wonderland (public domain)
-          curl -sL "https://www.gutenberg.org/cache/epub/11/pg11.txt" -o data/alice.txt
-          # Also add Shakespeare (public domain)
-          curl -sL "https://www.gutenberg.org/cache/epub/100/pg100.txt" -o data/shakespeare.txt
-          mkdir -p data
-          cat data/alice.txt data/shakespeare.txt > data/corpus.txt 2>/dev/null || true
-          echo "Corpus size: $(wc -c < data/corpus.txt 2>/dev/null || echo 'using built-in') bytes"
+          case "${{ github.event.inputs.model_size }}" in
+            nano)  echo "HIDDEN=768;LAYERS=12;HEADS=12;KV=4;FFN=2048;SEQ=512;VOCAB=1024" >> $GITHUB_OUTPUT ;;
+            mini)  echo "HIDDEN=1024;LAYERS=24;HEADS=16;KV=4;FFN=2752;SEQ=512;VOCAB=2048" >> $GITHUB_OUTPUT ;;
+            ci)    echo "HIDDEN=256;LAYERS=4;HEADS=4;KV=2;FFN=512;SEQ=64;VOCAB=260" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: Prepare training data
+        run: |
+          mkdir -p data/raw
+          if [ "${{ github.event.inputs.data_mode }}" = "security" ]; then
+            bash data/prepare.sh || true
+            cat data/instruct.txt 2>/dev/null >> data/corpus.txt || true
+          fi
+          if [ ! -s data/corpus.txt ] || [ $(wc -c < data/corpus.txt) -lt 1000 ]; then
+            echo "Using built-in corpus"
+            echo "fallback" > data/corpus.txt
+          fi
+          echo "Corpus: $(wc -c < data/corpus.txt 2>/dev/null || echo 0) bytes"
+
+      - name: Build trainer
+        run: cargo build --release --package nanomind-trainer
 
       - name: Train model
+        env:
+          HIDDEN: ${{ steps.hparams.outputs.HIDDEN }}
+          LAYERS:  ${{ steps.hparams.outputs.LAYERS }}
+          HEADS:   ${{ steps.hparams.outputs.HEADS }}
+          KV:      ${{ steps.hparams.outputs.KV }}
+          FFN:     ${{ steps.hparams.outputs.FFN }}
+          SEQ:     ${{ steps.hparams.outputs.SEQ }}
+          VOCAB:   ${{ steps.hparams.outputs.VOCAB }}
         run: |
-          echo "=== Starting Training ==="
-          echo "Steps: ${{ github.event.inputs.steps }}"
-          echo "Learning rate: ${{ github.event.inputs.lr }}"
+          cargo run --release --package nanomind-trainer -- train \
+            --steps   ${{ github.event.inputs.steps }} \
+            --lr      ${{ github.event.inputs.lr }} \
+            --vocab   $VOCAB \
+            --hidden  $HIDDEN \
+            --layers  $LAYERS \
+            --heads   $HEADS \
+            --kv-heads $KV \
+            --ffn     $FFN \
+            --seq-len $SEQ \
+            --corpus  data/corpus.txt \
+            --out     nanomind-${{ github.event.inputs.model_size }}.gguf
 
-          # Build the trainer
-          cargo build --release --package nanomind-trainer
-
-          # Run training
-          cargo run --release --package nanomind-trainer -- \
-            train \
-            --steps ${{ github.event.inputs.steps }} \
-            --lr ${{ github.event.inputs.lr }} \
-            --vocab 260 \
-            --hidden 128 \
-            --layers 4 \
-            --heads 4 \
-            --seq-len 32 \
-            --out nanomind-model.gguf
-
-      - name: Package GGUF model
+      - name: Generate Modelfile
         run: |
-          mkdir -p release
-          cp nanomind-model.gguf release/nanomind-model.gguf 2>/dev/null || true
-          # Also package the Modelfile
-          cat > release/Modelfile << 'EOF'
+          cat > Modelfile.trained << 'MEOF'
           FROM ./nanomind-model.gguf
 
           PARAMETER temperature 0.7
           PARAMETER top_p 0.9
           PARAMETER top_k 40
           PARAMETER repeat_penalty 1.1
-          PARAMETER num_ctx 256
+          PARAMETER num_ctx 2048
           PARAMETER stop "<|eos|>"
+          PARAMETER stop "<|user|>"
 
-          SYSTEM """You are NanoMind, a small AI assistant trained from scratch in pure Rust."""
-          EOF
+          SYSTEM """You are NanoMind, an AI assistant specialized in cybersecurity,
+          ethical hacking, Linux administration, Rust/Python programming, and CTF
+          challenges. You provide accurate technical information for learning and
+          authorized security testing."""
 
-          # Create tar with model + Modelfile
-          cd release
-          tar czf nanomind-trained.tar.gz nanomind-model.gguf Modelfile 2>/dev/null || true
-          sha256sum nanomind-trained.tar.gz > nanomind-trained.tar.gz.sha256 2>/dev/null || true
+          TEMPLATE """{{ if .System }}<|sys|>
+          {{ .System }}<|eos|>
+          {{ end }}<|user|>
+          {{ .Prompt }}<|eos|>
+          <|assistant|>
+          {{ .Response }}<|eos|>
+          """
+          MEOF
 
-      - name: Upload GGUF artifact
-        if: always()
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nanomind-trained-gguf
+          name: nanomind-${{ github.event.inputs.model_size }}-${{ github.run_number }}
           path: |
-            release/nanomind-model.gguf
-            release/Modelfile
-            release/nanomind-trained.tar.gz
-            release/nanomind-trained.tar.gz.sha256
+            nanomind-${{ github.event.inputs.model_size }}.gguf
+            Modelfile.trained
           retention-days: 30
 
-      - name: Upload to GitHub Release (if tag exists)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            release/nanomind-model.gguf
-            release/Modelfile
-            release/nanomind-trained.tar.gz
-          generate_release_notes: true
-
-      - name: Training summary
-        if: always()
+      - name: Summary
         run: |
-          echo "=== Training Complete ==="
-          if [ -f release/nanomind-model.gguf ]; then
-            echo "Model size: $(du -h release/nanomind-model.gguf | cut -f1)"
-            echo "Upload as GitHub Release or download from Actions artifacts"
-          else
-            echo "Warning: Model file not found"
+          echo "## Training Complete" >> $GITHUB_STEP_SUMMARY
+          echo "- Size: ${{ github.event.inputs.model_size }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Steps: ${{ github.event.inputs.steps }}" >> $GITHUB_STEP_SUMMARY
+          if [ -f nanomind-${{ github.event.inputs.model_size }}.gguf ]; then
+            echo "- GGUF: $(du -h nanomind-${{ github.event.inputs.model_size }}.gguf | cut -f1)" >> $GITHUB_STEP_SUMMARY
           fi

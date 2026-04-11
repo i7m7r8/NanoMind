@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use nanomind_trainer::config::ModelConfig;
-use nanomind_trainer::data_loader::get_training_corpus;
-use nanomind_trainer::train::{export_to_gguf, train_model, TrainConfig};
+use nanomind_trainer::train::{TrainConfig, train_model, export_to_gguf};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -29,22 +28,25 @@ fn main() {
 }
 
 fn print_usage() {
-    println!("NanoMind Trainer — train from scratch → GGUF for Ollama");
+    println!("NanoMind Trainer — train from scratch -> GGUF for Ollama");
     println!();
     println!("Usage:");
     println!("  nanomind-train train [OPTIONS]    Train a model from scratch");
     println!("  nanomind-train export --model <path> --out <path>  Export checkpoint to GGUF");
     println!();
     println!("Train Options:");
-    println!("  --steps <n>       Training steps (default: 200)");
-    println!("  --lr <float>      Learning rate (default: 0.001)");
-    println!("  --seq-len <n>     Sequence length (default: 32)");
-    println!("  --vocab <n>       Vocabulary size (default: 260)");
-    println!("  --hidden <n>      Hidden dimension (default: 128)");
-    println!("  --layers <n>      Number of layers (default: 4)");
-    println!("  --heads <n>       Number of attention heads (default: 4)");
-    println!("  --out <path>      Output GGUF path (default: nanomind.gguf)");
-    println!("  --seed <n>        Random seed (default: 42)");
+    println!("  --steps <n>        Training steps (default: 200)");
+    println!("  --lr <float>       Learning rate (default: 0.001)");
+    println!("  --seq-len <n>      Sequence length (default: 32)");
+    println!("  --vocab <n>        Vocabulary size (default: 260)");
+    println!("  --hidden <n>       Hidden dimension (default: 128)");
+    println!("  --layers <n>       Number of layers (default: 4)");
+    println!("  --heads <n>        Number of attention heads (default: 4)");
+    println!("  --kv-heads <n>     Number of KV heads (default: heads/2)");
+    println!("  --ffn <n>          FFN intermediate dim (default: hidden*2)");
+    println!("  --corpus <path>    Path to training corpus file");
+    println!("  --out <path>       Output GGUF path (default: nanomind.gguf)");
+    println!("  --seed <n>         Random seed (default: 42)");
     println!();
     println!("Example:");
     println!("  nanomind-train train --steps 500 --out model.gguf");
@@ -58,48 +60,27 @@ fn cmd_train(args: &[String]) {
     let mut hidden = 128usize;
     let mut layers = 4usize;
     let mut heads = 4usize;
+    let mut kv_heads = None;
+    let mut ffn = None;
     let mut out_path = PathBuf::from("nanomind.gguf");
     let mut seed = 42u64;
+    let mut corpus_path: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--steps" => {
-                i += 1;
-                steps = args[i].parse().expect("Invalid steps");
-            }
-            "--lr" => {
-                i += 1;
-                lr = args[i].parse().expect("Invalid learning rate");
-            }
-            "--seq-len" => {
-                i += 1;
-                seq_len = args[i].parse().expect("Invalid seq-len");
-            }
-            "--vocab" => {
-                i += 1;
-                vocab = args[i].parse().expect("Invalid vocab size");
-            }
-            "--hidden" => {
-                i += 1;
-                hidden = args[i].parse().expect("Invalid hidden dim");
-            }
-            "--layers" => {
-                i += 1;
-                layers = args[i].parse().expect("Invalid layers");
-            }
-            "--heads" => {
-                i += 1;
-                heads = args[i].parse().expect("Invalid heads");
-            }
-            "--out" => {
-                i += 1;
-                out_path = PathBuf::from(&args[i]);
-            }
-            "--seed" => {
-                i += 1;
-                seed = args[i].parse().expect("Invalid seed");
-            }
+            "--steps" => { i += 1; steps = args[i].parse().expect("Invalid steps"); }
+            "--lr" => { i += 1; lr = args[i].parse().expect("Invalid learning rate"); }
+            "--seq-len" => { i += 1; seq_len = args[i].parse().expect("Invalid seq-len"); }
+            "--vocab" => { i += 1; vocab = args[i].parse().expect("Invalid vocab size"); }
+            "--hidden" => { i += 1; hidden = args[i].parse().expect("Invalid hidden dim"); }
+            "--layers" => { i += 1; layers = args[i].parse().expect("Invalid layers"); }
+            "--heads" => { i += 1; heads = args[i].parse().expect("Invalid heads"); }
+            "--kv-heads" => { i += 1; kv_heads = Some(args[i].parse().expect("Invalid kv-heads")); }
+            "--ffn" => { i += 1; ffn = Some(args[i].parse().expect("Invalid ffn")); }
+            "--corpus" => { i += 1; corpus_path = Some(args[i].clone()); }
+            "--out" => { i += 1; out_path = PathBuf::from(&args[i]); }
+            "--seed" => { i += 1; seed = args[i].parse().expect("Invalid seed"); }
             _ => {
                 eprintln!("Unknown option: {}", args[i]);
                 std::process::exit(1);
@@ -108,6 +89,9 @@ fn cmd_train(args: &[String]) {
         i += 1;
     }
 
+    let kv_heads = kv_heads.unwrap_or(heads / 2);
+    let ffn = ffn.unwrap_or(hidden * 2);
+
     println!("=== NanoMind Training ===");
     println!("Steps: {}", steps);
     println!("Learning rate: {}", lr);
@@ -115,8 +99,12 @@ fn cmd_train(args: &[String]) {
     println!("Vocab size: {}", vocab);
     println!("Hidden dim: {}", hidden);
     println!("Layers: {}", layers);
-    println!("Heads: {}", heads);
+    println!("Heads: {} (KV: {})", heads, kv_heads);
+    println!("FFN dim: {}", ffn);
     println!("Output: {:?}", out_path);
+    if let Some(ref cp) = corpus_path {
+        println!("Corpus: {}", cp);
+    }
     println!();
 
     // Build config
@@ -124,9 +112,9 @@ fn cmd_train(args: &[String]) {
         vocab_size: vocab,
         hidden_dim: hidden,
         num_heads: heads,
-        num_kv_heads: heads / 2,
+        num_kv_heads: kv_heads,
         num_layers: layers,
-        intermediate_dim: hidden * 2,
+        intermediate_dim: ffn,
         max_seq_len: seq_len,
         rope_theta: 10000.0,
         rms_norm_eps: 1e-5,
@@ -147,19 +135,15 @@ fn cmd_train(args: &[String]) {
         eval_every: 10,
         seed,
         checkpoint_dir: "checkpoints".to_string(),
+        corpus_path,
     };
 
-    println!(
-        "Model params: {:.2}M",
-        train_config.model_config.param_count() as f64 / 1e6
-    );
-    println!("Corpus size: {} bytes", get_training_corpus().len());
+    println!("Model params: {:.2}M", train_config.model_config.param_count() as f64 / 1e6);
     println!();
 
     let start = Instant::now();
 
     let (model, tokenizer) = train_model(train_config, |_step, loss, lr| {
-        // Progress callback
         let _ = (loss, lr);
     });
 

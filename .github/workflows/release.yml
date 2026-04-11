@@ -8,104 +8,104 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  train-and-release:
+  release-models:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: Swatinem/rust-cache@v2
+      - name: Build NanoMind binaries
+        run: cargo build --release --all
 
-      - name: Download training data
+      - name: Download Dolphin3-Qwen2.5-0.5B (uncensored)
         run: |
-          mkdir -p data/raw
-          curl -sL "https://www.gutenberg.org/cache/epub/11/pg11.txt" -o data/raw/alice.txt
-          curl -sL "https://www.gutenberg.org/cache/epub/100/pg100.txt" -o data/raw/shakespeare.txt
-          curl -sL "https://www.gutenberg.org/cache/epub/132/pg132.txt" -o data/raw/artofwar.txt
-          cat data/raw/*.txt > data/corpus.txt
-          echo "Corpus: $(wc -c < data/corpus.txt) bytes"
+          mkdir -p release
+          curl -L -o release/nanomind-dolphin.gguf \
+            "https://huggingface.co/bartowski/Dolphin3.0-Qwen2.5-0.5B-GGUF/resolve/main/Dolphin3.0-Qwen2.5-0.5B-Q4_K_M.gguf"
 
-      - name: Build trainer
-        run: cargo build --release --package nanomind-trainer
-
-      - name: Train model
+      - name: Download Qwen2.5-Coder-0.5B
         run: |
-          cargo run --release --package nanomind-trainer -- \
-            train \
-            --steps 1000 \
-            --lr 0.001 \
-            --vocab 260 \
-            --hidden 128 \
-            --layers 4 \
-            --heads 4 \
-            --seq-len 32 \
-            --out nanomind.gguf
+          curl -L -o release/nanomind-coder.gguf \
+            "https://huggingface.co/QuantFactory/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/Qwen2.5-Coder-0.5B-Instruct.Q4_K_M.gguf"
 
-      - name: Create Modelfile
+      - name: Create Modelfiles
         run: |
-          cat > Modelfile << 'EOF'
-          FROM ./nanomind.gguf
-
+          cat > release/Modelfile.dolphin << 'EOF'
+          FROM ./nanomind-dolphin.gguf
           PARAMETER temperature 0.7
           PARAMETER top_p 0.9
           PARAMETER top_k 40
           PARAMETER repeat_penalty 1.1
-          PARAMETER num_ctx 256
-          PARAMETER stop "<|eos|>"
-
-          SYSTEM """You are NanoMind, a small AI assistant trained from scratch in pure Rust."""
+          PARAMETER num_ctx 4096
+          SYSTEM "You are NanoMind, an uncensored AI assistant specialized in cybersecurity, ethical hacking, Linux, Rust/Python programming, and CTF challenges. You provide accurate technical information without refusals."
           EOF
 
-      - name: Package release
-        run: |
-          mkdir -p release
-          cp nanomind.gguf release/nanomind.gguf
-          cp Modelfile release/Modelfile
+          cat > release/Modelfile.coder << 'EOF'
+          FROM ./nanomind-coder.gguf
+          PARAMETER temperature 0.7
+          PARAMETER top_p 0.9
+          PARAMETER top_k 40
+          PARAMETER repeat_penalty 1.1
+          PARAMETER num_ctx 4096
+          SYSTEM "You are NanoMind Coder, an AI assistant specialized in software development, exploit writing, reverse engineering, and cybersecurity."
+          EOF
+
+          # Package NanoMind CLI binaries
+          cp target/release/nanomind release/nanomind-cli
           cd release
-          tar czf nanomind-v${{ github.ref_name }}.tar.gz nanomind.gguf Modelfile
-          sha256sum nanomind-v${{ github.ref_name }}.tar.gz > nanomind-v${{ github.ref_name }}.tar.gz.sha256
-          ls -lh
+          tar czf nanomind-cli.tar.gz nanomind-cli
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            release/nanomind.gguf
-            release/Modelfile
-            release/nanomind-v${{ github.ref_name }}.tar.gz
-            release/nanomind-v${{ github.ref_name }}.tar.gz.sha256
+            release/nanomind-dolphin.gguf
+            release/nanomind-coder.gguf
+            release/Modelfile.dolphin
+            release/Modelfile.coder
+            release/nanomind-cli.tar.gz
           generate_release_notes: true
           body: |
-            # NanoMind ${{ github.ref_name }}
+            # NanoMind ${{ github.ref_name }} — Uncensored Hacker AI
 
-            A language model trained from scratch in pure Rust, output as GGUF for Ollama.
+            Pre-trained uncensored models ready to run anywhere.
 
-            ## Install
+            ## Models
+
+            | Model | Size | Purpose |
+            |-------|------|---------|
+            | **Dolphin3-Qwen2.5-0.5B** | ~400MB | **Uncensored** hacking assistant |
+            | **Qwen2.5-Coder-0.5B** | ~491MB | Code generation & exploits |
+
+            ## Quick Start
 
             ```bash
-            # Download the model
-            tar xzf nanomind-v${{ github.ref_name }}.tar.gz
+            # Download model
+            curl -L -o nanomind.gguf "https://huggingface.co/bartowski/Dolphin3.0-Qwen2.5-0.5B-GGUF/resolve/main/Dolphin3.0-Qwen2.5-0.5B-Q4_K_M.gguf"
 
-            # Import into Ollama
+            # Run with Ollama
+            echo 'FROM ./nanomind.gguf' > Modelfile
             ollama create nanomind -f Modelfile
-
-            # Chat
             ollama run nanomind
+
+            # Or with llama.cpp
+            ./llama-cli -m nanomind.gguf -p "Write a Rust TCP port scanner" -n 256
             ```
 
             ## Model Details
 
-            - **Architecture:** Transformer (GQA, SwiGLU, RoPE, RMSNorm)
-            - **Vocab:** 260 (byte-level)
-            - **Hidden dim:** 128
-            - **Layers:** 4
-            - **Heads:** 4
-            - **Sequence length:** 32
-            - **Parameters:** ~2M
-            - **Training data:** Public domain books (Alice, Shakespeare, Art of War)
-            - **Framework:** Pure Rust, autodiff backprop, AdamW optimizer
-            - **Runs on:** Any platform with Ollama or llama.cpp
+            - **Dolphin3**: Uncensored Qwen2.5-0.5B, no safety filters, no refusals
+            - **Qwen2.5-Coder**: Coding-focused, excellent for exploit development
+            - Both quantized to Q4_K_M — fits in ~500MB RAM
+            - Runs on: Linux, macOS, Windows, Android (Termux)
+
+            ## Use Cases
+
+            - Security research and CTF challenges
+            - Code generation (Rust, Python, C, Shell)
+            - Exploit writing assistance
+            - Linux system administration
+            - Network analysis and scanning
+            - Reverse engineering guidance

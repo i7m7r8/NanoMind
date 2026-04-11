@@ -51,7 +51,6 @@ impl DataLoader {
     /// Get the next training batch.
     /// Returns (input_sequences, target_sequences), each [batch_size, seq_len].
     /// Targets are inputs shifted left by 1 (next token prediction).
-    #[allow(clippy::type_complexity)]
     pub fn next_batch(&mut self) -> Option<(Vec<Vec<u32>>, Vec<Vec<u32>>)> {
         let total_needed = self.batch_size * (self.seq_len + 1);
         if self.pos + total_needed > self.tokens.len() {
@@ -140,54 +139,35 @@ impl ByteTokenizer {
     }
 }
 
-/// Generate training data from text (built-in corpus for from-scratch training).
-/// Returns the text content to tokenize.
+/// Load training corpus from file if available, otherwise use built-in fallback.
+/// This fixes the bug where the corpus was hardcoded to 30 toy sentences.
 pub fn get_training_corpus() -> String {
-    // Built-in simple English corpus for training
-    // This provides basic language knowledge without external data
-    let sentences = [
-        "the cat sat on the mat.",
-        "the dog ran in the park.",
-        "a bird flew over the tree.",
-        "the sun is bright today.",
-        "the fish swam in the pond.",
-        "i like to read books.",
-        "she went to the store.",
-        "the children played outside.",
-        "he ate an apple for lunch.",
-        "the rain fell on the ground.",
-        "the moon shines at night.",
-        "we walked along the beach.",
-        "the flowers bloom in spring.",
-        "the wind blew through the trees.",
-        "the baby slept peacefully.",
-        "the teacher wrote on the board.",
-        "the car drove down the road.",
-        "the cow grazed in the field.",
-        "the snow covered the mountain.",
-        "the river flows to the sea.",
-        "the stars twinkle in the sky.",
-        "the boy kicked the ball.",
-        "the girl sang a song.",
-        "the clock ticked on the wall.",
-        "the phone rang in the room.",
-        "the coffee was hot and fresh.",
-        "the book was very interesting.",
-        "the door opened slowly.",
-        "the light turned green.",
-        "the train arrived on time.",
-    ];
-
-    // Repeat to get enough data for training
-    let mut corpus = String::new();
-    for _ in 0..10 {
-        for s in &sentences {
-            corpus.push_str(s);
-            corpus.push('\n');
+    // Try to load from file first (real training data)
+    for path in &["data/corpus.txt", "data/train.txt", "corpus.txt"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            if text.len() > 10_000 {
+                eprintln!("[data] Loaded corpus: {} bytes from {}", text.len(), path);
+                return text;
+            }
         }
     }
-    corpus
+    // Fallback: built-in text (only for CI smoke tests)
+    eprintln!("[data] WARNING: Using built-in toy corpus. Run data/prepare.sh for real training.");
+    BUILTIN_CORPUS.to_string()
 }
+
+const BUILTIN_CORPUS: &str = "\
+The cat sat on the mat. The dog ran in the park. A bird flew over the tree.
+The sun is bright today. The fish swam in the pond. I like to read books.
+She went to the store. The children played outside. He ate an apple for lunch.
+The rain fell on the ground. The moon shines at night. We walked along the beach.
+The flowers bloom in spring. The wind blew through the trees. The baby slept peacefully.
+The teacher wrote on the board. The car drove down the road. The cow grazed in the field.
+The snow covered the mountain. The river flows to the sea. The stars twinkle in the sky.
+The boy kicked the ball. The girl sang a song. The clock ticked on the wall.
+The phone rang in the room. The coffee was hot and fresh. The book was very interesting.
+The door opened slowly. The light turned green. The train arrived on time.
+";
 
 #[cfg(test)]
 mod tests {
@@ -225,6 +205,7 @@ mod tests {
     fn test_training_corpus() {
         let corpus = get_training_corpus();
         assert!(!corpus.is_empty());
+        // Should be > 100 chars even for fallback
         assert!(corpus.len() > 100);
     }
 
