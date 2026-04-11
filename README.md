@@ -1,85 +1,127 @@
-# NanoMind — Ultra-Compressed Pure-Rust LLM Inference Engine
+# NanoMind — Train an LLM from Scratch in Pure Rust
 
-**Run any GGUF model on anything — even a phone. Zero Python. Zero dependencies at runtime.**
+**A language model trained from zero, output as GGUF, runs with Ollama. No external weights. No HuggingFace. Pure Rust.**
 
-## Features
+## What This Is
 
-- **Direct GGUF v3 loading** — download any HuggingFace GGUF model, run it. No conversion needed.
-- **Full llama.cpp quantization** — Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K_M, Q5_K, Q6_K, IQ4_NL
-- **Unlimited context** — ring buffer KV cache with automatic eviction. Extended context via RoPE scaling (NTK-aware, YARN, Linear).
-- **Ollama-compatible HTTP API** — drop-in replacement for Ollama at `/api/generate`, `/api/chat`, `/api/embeddings`
-- **Advanced sampling** — greedy, temperature, top-k, top-p, min-p, mirostat v2, repetition/presence/frequency penalty, logit bias
-- **Multi-architecture** — LLaMA, Qwen2/2.5/3, Mistral, Phi-3, Gemma 2 with GQA, SwiGLU, MoE, sliding window, logit softcap
-- **Cross-platform** — Linux x86_64/ARM64, Android ARM64, macOS, Windows
+NanoMind trains a transformer language model **from scratch** using only:
+- Raw text data (public domain books)
+- Pure Rust training code
+- GitHub Actions free tier (2 CPU cores, 7GB RAM, 6 hours)
+
+The output is a **real GGUF file** that works with Ollama.
 
 ## Quick Start
 
+### Option 1: Train on GitHub Actions (free, no setup)
+
+1. Go to **Actions → Train (Manual)**
+2. Click **Run workflow**
+3. Choose training steps (500-5000) and learning rate
+4. Wait for completion
+5. Download `nanomind-trained.tar.gz` from artifacts
+
 ```bash
-# Download any GGUF model from HuggingFace
-# Example: qwen2.5-0.5b-instruct-q4_k_m.gguf
-
-# Single prompt
-./nanomind --model ./model.gguf --prompt "Explain quantum computing"
-
-# Interactive chat
-./nanomind --model ./model.gguf --chat
-
-# Ollama-compatible server
-./nanomind --model ./model.gguf --server --host 127.0.0.1:8080
-
-# Then use with any Ollama client:
-# curl http://127.0.0.1:8080/api/generate -d '{"model":"nanomind","prompt":"Hello"}'
-
-# Benchmark
-./nanomind --model ./model.gguf --bench
-
-# Extended context (128K with RoPE scaling)
-./nanomind --model ./model.gguf --ctx-size 131072 --prompt "Summarize this..."
+# Use with Ollama:
+tar xzf nanomind-trained.tar.gz
+ollama create nanomind -f Modelfile
+ollama run nanomind
 ```
 
-## CLI Reference
+### Option 2: Train Locally
+
+```bash
+# Download training data
+bash data/prepare.sh
+
+# Train model
+cargo run --release --package nanomind-trainer -- \
+  train \
+  --steps 1000 \
+  --lr 0.001 \
+  --vocab 260 \
+  --hidden 128 \
+  --layers 4 \
+  --heads 4 \
+  --seq-len 32 \
+  --out nanomind.gguf
+
+# Use with Ollama:
+echo 'FROM ./nanomind.gguf' > Modelfile
+ollama create nanomind -f Modelfile
+ollama run nanomind
+```
+
+## CLI Options
 
 | Flag | Description | Default |
 |------|-------------|---------|
-| `--model <path>` | Path to GGUF model file | *required* |
-| `--prompt <text>` | Single prompt | stdin |
-| `--chat` | Interactive chat mode | off |
-| `--server` | Start HTTP server | off |
-| `--host <addr>` | Server listen address | `127.0.0.1:8080` |
-| `--bench` | Benchmark 100 tokens | off |
-| `--max-tokens <n>` | Max tokens (0 = unlimited) | 0 |
-| `--temp <float>` | Temperature (0 = greedy) | 0.8 |
-| `--top-k <n>` | Top-k filtering | 40 |
-| `--top-p <float>` | Nucleus sampling | 0.95 |
-| `--repeat-penalty <float>` | Repetition penalty | 1.1 |
-| `--mirostat <0\|2>` | Mirostat sampling | 0 (off) |
-| `--ctx-size <n>` | Context window | model default |
-| `--seed <n>` | Seed for reproducibility | 42 |
+| `--steps <n>` | Training steps | 200 |
+| `--lr <float>` | Learning rate | 0.001 |
+| `--vocab <n>` | Vocabulary size | 260 (byte-level) |
+| `--hidden <n>` | Hidden dimension | 128 |
+| `--layers <n>` | Number of layers | 4 |
+| `--heads <n>` | Attention heads | 4 |
+| `--seq-len <n>` | Sequence length | 32 |
+| `--out <path>` | Output GGUF path | `nanomind.gguf` |
+| `--seed <n>` | Random seed | 42 |
 
-## Ollama API Compatibility
+## Model Configurations
 
-When running with `--server`, NanoMind exposes these endpoints:
+| Config | Params | RAM | Use Case |
+|--------|--------|-----|----------|
+| nano (default) | ~2M | ~120 MB | CI / quick tests |
+| mini | ~15M | ~340 MB | Desktop training |
+| small | ~50M | ~480 MB | Quality model |
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/generate` | POST | Text completion |
-| `/api/chat` | POST | Chat completion |
-| `/api/embeddings` | POST | Text embeddings |
-| `/api/tags` | GET | List loaded models |
-| `/api/show` | POST | Model info |
+## Architecture
 
-Use with any Ollama-compatible client:
-
-```bash
-# Open WebUI, AnythingLLM, Continue.dev, etc.
-# Point them at http://127.0.0.1:8080
+```
+Transformer (decoder-only)
+├── Byte-level tokenizer (vocab 260)
+├── Embedding: [vocab × hidden]
+├── N layers:
+│   ├── RMSNorm + QKV projections
+│   ├── Multi-Head Attention (GQA)
+│   ├── RoPE positional encoding
+│   ├── SwiGLU FFN
+│   └── Residual connections
+├── Final RMSNorm
+└── Output projection (tied embeddings)
 ```
 
-## Build
+## Training Details
+
+- **Optimizer:** AdamW with cosine LR schedule + warmup
+- **Gradient clipping:** 1.0 max norm
+- **Weight decay:** 0.01
+- **Data:** Public domain books (Alice in Wonderland, Shakespeare, etc.)
+- **Output:** GGUF v3 format (Ollama-compatible)
+
+## Ollama Integration
+
+The GGUF file produced is natively compatible with Ollama:
 
 ```bash
-cargo build --release --all
-# Binary: target/release/nanomind
+# Create a Modelfile
+cat > Modelfile << 'EOF'
+FROM ./nanomind.gguf
+
+PARAMETER temperature 0.7
+PARAMETER top_p 0.9
+PARAMETER top_k 40
+PARAMETER repeat_penalty 1.1
+PARAMETER num_ctx 256
+PARAMETER stop "<|eos|>"
+
+SYSTEM """You are NanoMind, a small AI assistant trained from scratch in pure Rust."""
+EOF
+
+# Import into Ollama
+ollama create nanomind -f Modelfile
+
+# Chat with your model
+ollama run nanomind "Write a short story about a robot"
 ```
 
 ## Project Structure
@@ -87,27 +129,53 @@ cargo build --release --all
 ```
 NanoMind/
 ├── crates/
-│   ├── nanomind-core/      # GGML types, dequant kernels, RoPE, tensor ops
-│   ├── nanomind-gguf/      # GGUF v3 file parser (mmap-backed, zero-copy)
-│   ├── nanomind-model/     # Transformer forward pass
-│   ├── nanomind-tokenizer/ # Token-level tokenizer
-│   ├── nanomind-sampling/  # Advanced sampling (mirostat, penalties, etc.)
-│   ├── nanomind-server/    # Ollama-compatible HTTP server
-│   └── nanomind/           # CLI binary
-└── .github/workflows/
-    ├── ci.yml              # Build + test + clippy on every push
-    └── release.yml         # Cross-compile release binaries (Linux, Android, macOS, Windows)
+│   ├── nanomind-core/      # GGML types, GGUF writer, tensor ops
+│   ├── nanomind-gguf/      # GGUF file reader
+│   ├── nanomind-model/     # Inference engine (loads GGUF)
+│   ├── nanomind-tokenizer/ # Tokenizer for inference
+│   ├── nanomind-sampling/  # Sampling strategies
+│   ├── nanomind-server/    # HTTP API server
+│   ├── nanomind-trainer/   # FROM-SCRATCH TRAINING ENGINE
+│   │   ├── autodiff.rs     # Reverse-mode autodiff (backprop)
+│   │   ├── model.rs        # Transformer architecture
+│   │   ├── optimizer.rs    # AdamW optimizer
+│   │   ├── data_loader.rs  # Training data pipeline
+│   │   └── train.rs        # Training loop + GGUF export
+│   └── nanomind/           # CLI binary (inference)
+├── data/
+│   └── prepare.sh          # Download training data
+├── .github/workflows/
+│   ├── ci.yml              # Build + test on every push
+│   ├── train.yml           # Manual training trigger
+│   └── release.yml         # Cross-compile binaries
+└── README.md
 ```
 
-## Downloads
+## Training Data
 
-See [Releases](https://github.com/i7m7r8/NanoMind/releases) for pre-built binaries:
+Public domain books (no copyright issues):
+- Alice in Wonderland (Lewis Carroll)
+- Shakespeare Complete Works
+- The Art of War (Sun Tzu)
+- Aesop's Fables
 
-- `nanomind-linux-x86_64.tar.gz`
-- `nanomind-linux-aarch64.tar.gz`
-- `nanomind-android-arm64.tar.gz`
-- `nanomind-macos-x86_64.tar.gz`
-- `nanomind-windows-x86_64.tar.gz`
+Download with: `bash data/prepare.sh`
+
+## Expected Output Quality
+
+After 1000 steps on the default corpus:
+- **Coherent short sentences** (5-15 words)
+- **Basic grammar patterns**
+- **Repetitive but not nonsense**
+
+This is a **tiny** model (~2M params) trained on CPU. Don't expect ChatGPT — expect a toy that produces English-like text.
+
+## Build
+
+```bash
+cargo build --release --all
+cargo test --all  # 43 tests pass
+```
 
 ## License
 
