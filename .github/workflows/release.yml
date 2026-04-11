@@ -85,18 +85,23 @@ jobs:
 
       - name: Create Modelfiles
         run: |
-          SYSTEM_PROMPT="You are a helpful AI assistant for cybersecurity, Linux, Rust, Python, CTF challenges, and Termux tools. Provide accurate technical information for learning and authorized security testing."
-          STOP1=$(printf '\x3c/s\x3e')
-          STOP2=$(printf '\x3c|im_end\x3e')
-
+          SYSTEM="You are a helpful AI assistant for cybersecurity, Linux, Rust, Python, CTF challenges, and Termux tools. Provide accurate technical information for learning and authorized security testing."
           for q in iq1s iq1m iq2xxs iq2xs q2k; do
             [ -f "release/nanomind-hacker-${q}.gguf" ] || continue
-            printf 'FROM ./nanomind-hacker-%s.gguf\nPARAMETER temperature 0.3\nPARAMETER top_k 20\nPARAMETER top_p 0.85\nPARAMETER repeat_penalty 1.15\nPARAMETER num_ctx 512\nPARAMETER num_predict 256\nPARAMETER stop %q\nPARAMETER stop %q\nSYSTEM %q\n' \
-              "$q" "$STOP1" "$STOP2" "$SYSTEM_PROMPT" \
-              > "release/Modelfile-${q}"
+            { echo "FROM ./nanomind-hacker-${q}.gguf"
+              echo "PARAMETER temperature 0.3"
+              echo "PARAMETER top_k 20"
+              echo "PARAMETER top_p 0.85"
+              echo "PARAMETER repeat_penalty 1.15"
+              echo "PARAMETER num_ctx 512"
+              echo "PARAMETER num_predict 256"
+              echo 'PARAMETER stop "</s>"'
+              echo "SYSTEM \"${SYSTEM}\""
+            } > "release/Modelfile-${q}"
           done
-
-          echo "=== Release directory ==="
+          echo "=== Modelfile content check ==="
+          cat release/Modelfile-iq2xxs 2>/dev/null || echo "not found"
+          echo "=== All release files ==="
           ls -lh release/
 
       - name: Upload to GitHub Release
